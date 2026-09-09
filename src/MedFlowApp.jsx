@@ -5,6 +5,8 @@ import {
   Menu, ArrowRight, ArrowLeft, Eye, EyeOff, Pencil, RefreshCw, Info, Paperclip, Plus,
 } from "lucide-react";
 import { submitExtraction, getExtraction, isTerminal } from "./api";
+import { LiveExtract, LiveData } from "./LiveExtraction";
+import { syntaxHighlight, flattenSchema } from "./format";
 
 /* ────────────────────────────────────────────────────────────────────────
    Demo case data — one continuous scenario across every stage.
@@ -30,6 +32,14 @@ walks with a slight limp on that side. X-ray shows moderate osteoarthritis
 of the right knee with some narrowing of the inner joint space and a few
 small spurs, no fracture. Will send her to orthopedics to take a look at
 the chronic right knee pain.`;
+
+const EXTRACTED = {
+  patient: { age: 52, gender: "female", evidence: "52-year-old female" },
+  symptom: { name: "knee pain", location: "right knee", duration: "3 months", evidence: "right knee pain for 3 months" },
+  aggravating: { value: "climbing stairs", evidence: "worse when climbing stairs" },
+  imaging: { type: "X-ray", finding: "moderate osteoarthritis", evidence: "X-ray shows moderate osteoarthritis" },
+  trauma: { value: false, evidence: "Patient denies trauma" },
+};
 
 const CLASSIFICATION = {
   bodySystem: "Orthopedic",
@@ -104,6 +114,10 @@ const NAV = [
   { id: "rules", label: "Business rules", icon: Scale },
   { id: "referral", label: "Referral generation", icon: FileSignature },
   { id: "review", label: "Doctor review", icon: UserCheck },
+  // Live tabs — the real backend/AI round trip. Always reachable, outside the
+  // linear demo flow above.
+  { id: "live-extract", label: "AI extraction · live", icon: Sparkles, always: true, live: true },
+  { id: "live-data", label: "Structured JSON · live", icon: Database, always: true, live: true },
 ];
 
 const STATUS_BY_PAGE = {
@@ -115,6 +129,8 @@ const STATUS_BY_PAGE = {
   rules: "Processing",
   referral: "Awaiting review",
   review: "Awaiting review",
+  "live-extract": "Live",
+  "live-data": "Live",
 };
 
 export default function MedFlowApp() {
@@ -136,35 +152,29 @@ export default function MedFlowApp() {
   const [attested, setAttested] = useState(false);
   const [ackGap, setAckGap] = useState(false);
 
-  // Live AI extraction: the backend record for this case's clinical note.
-  // The id is persisted so a page refresh during the (10–30 min) job recovers.
-  const [extractionId, setExtractionId] = useState(() => {
-    try { return localStorage.getItem("mf_extraction_id"); } catch { return null; }
+  // Live AI extraction (the "· live" nav tabs only — the mocked wizard above is
+  // untouched). The id is persisted so a refresh during the 10–30 min job recovers.
+  const [liveId, setLiveId] = useState(() => {
+    try { return localStorage.getItem("mf_live_extraction_id"); } catch { return null; }
   });
-  const [extraction, setExtraction] = useState(null);
+  const [live, setLive] = useState(null);
 
   useEffect(() => {
     try {
-      if (extractionId) localStorage.setItem("mf_extraction_id", extractionId);
-      else localStorage.removeItem("mf_extraction_id");
+      if (liveId) localStorage.setItem("mf_live_extraction_id", liveId);
+      else localStorage.removeItem("mf_live_extraction_id");
     } catch { /* ignore */ }
-  }, [extractionId]);
+  }, [liveId]);
 
-  // If we recovered an id on load, jump to the AI page to resume polling.
+  // Poll the backend while the live job is still in flight.
   useEffect(() => {
-    if (extractionId && !extraction && page === "patient") goTo("ai");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Poll the backend while the job is still in flight.
-  useEffect(() => {
-    if (!extractionId) return;
-    if (extraction && isTerminal(extraction.status)) return;
+    if (!liveId) return;
+    if (live && isTerminal(live.status)) return;
     let alive = true;
     const tick = async () => {
       try {
-        const rec = await getExtraction(extractionId);
-        if (alive) setExtraction(rec);
+        const rec = await getExtraction(liveId);
+        if (alive) setLive(rec);
       } catch {
         /* transient — keep polling */
       }
@@ -175,7 +185,18 @@ export default function MedFlowApp() {
       alive = false;
       clearInterval(timer);
     };
-  }, [extractionId, extraction?.status]);
+  }, [liveId, live?.status]);
+
+  const submitLive = useCallback(async (note, pathway) => {
+    const rec = await submitExtraction({ note, pathway });
+    setLive(rec);
+    setLiveId(rec.id);
+  }, []);
+
+  const resetLive = useCallback(() => {
+    setLive(null);
+    setLiveId(null);
+  }, []);
 
   const hasGap = COMPLETENESS_CHECKS.some((c) => !c.met);
   const currentIndex = NAV.findIndex((n) => n.id === page);
@@ -200,22 +221,7 @@ export default function MedFlowApp() {
     if (currentIndex > 0) goTo(NAV[currentIndex - 1].id);
   };
 
-  // Submit the pasted note to the backend, then move to the AI extraction page.
-  const runExtraction = useCallback(async () => {
-    const rec = await submitExtraction({ note: notes, pathway });
-    setExtraction(rec);
-    setExtractionId(rec.id);
-    goTo("ai");
-    showToast(`Case ${CASE_ID} created — extraction running`);
-  }, [notes, pathway, goTo, showToast]);
-
-  const retryExtraction = useCallback(() => {
-    setExtraction(null);
-    setExtractionId(null);
-    goTo("intake");
-  }, [goTo]);
-
-  const statusLabel = sendState === "sent" ? "Sent" : STATUS_BY_PAGE[page];
+  const statusLabel = sendState === "sent" ? "Sent" : (STATUS_BY_PAGE[page] || "Live");
 
   return (
     <div className="mf-app">
@@ -254,20 +260,22 @@ export default function MedFlowApp() {
                 pathway={pathway} setPathway={setPathway}
                 notes={notes} setNotes={setNotes}
                 files={files} setFiles={setFiles}
-                onCreate={runExtraction}
+                onCreate={() => { showToast(`Case ${CASE_ID} created`); next(); }}
                 onBack={back}
               />
             )}
-            {page === "ai" && (
-              <PageAI
-                extraction={extraction}
-                note={notes}
-                onNext={next}
-                onRetry={retryExtraction}
+            {page === "ai" && <PageAI onNext={next} />}
+            {page === "structured" && <PageStructured onNext={next} onBack={back} />}
+            {page === "live-extract" && (
+              <LiveExtract
+                live={live}
+                submitLive={submitLive}
+                resetLive={resetLive}
+                goData={() => goTo("live-data")}
               />
             )}
-            {page === "structured" && (
-              <PageStructured extraction={extraction} onNext={next} onBack={back} />
+            {page === "live-data" && (
+              <LiveData live={live} goExtract={() => goTo("live-extract")} />
             )}
             {page === "validation" && <PageValidation hasGap={hasGap} onNext={next} onBack={back} />}
             {page === "rules" && (
@@ -370,8 +378,8 @@ function Sidebar({ nav, page, visited, maxVisitedIndex, goTo, open, patient, pat
           {nav.map((n, i) => {
             const Icon = n.icon;
             const isCurrent = n.id === page;
-            const isDone = visited[n.id] && i < currentIdx;
-            const reachable = i <= maxVisitedIndex + 1;
+            const isDone = visited[n.id] && i < currentIdx && !n.always;
+            const reachable = n.always || i <= maxVisitedIndex + 1;
             const state = isCurrent ? "current" : isDone ? "done" : reachable ? "upcoming" : "locked";
             return (
               <button
@@ -502,28 +510,11 @@ const PATHWAY_REQUIREMENTS = {
 function PageIntake({ pathway, setPathway, notes, setNotes, files, setFiles, onCreate, onBack }) {
   const [dragOver, setDragOver] = useState(false);
   const [touched, setTouched] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(null);
   const inputRef = useRef(null);
   const requirements = PATHWAY_REQUIREMENTS[pathway] ?? [];
   const isMet = (req) => files.some((f) => req.keywords.some((kw) => f.name.toLowerCase().includes(kw)));
-  const notesValid = notes.trim().length >= 10;
-  const canSubmit = notesValid && pathway && !busy;
-
-  // onCreate() (runExtraction) POSTs to the backend and navigates away on
-  // success, so we only handle the failure path here.
-  const submit = async () => {
-    setTouched(true);
-    if (!notesValid || !pathway || busy) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await onCreate();
-    } catch (e) {
-      setErr(e?.message || "Could not reach the backend. Is it running on port 8010?");
-      setBusy(false);
-    }
-  };
+  const notesValid = notes.trim().length > 0;
+  const canSubmit = notesValid && pathway;
 
   const addFiles = (fileList) => {
     const incoming = Array.from(fileList).map((f) => ({ id: `${f.name}-${Date.now()}-${Math.random()}`, name: f.name, size: f.size }));
@@ -559,7 +550,7 @@ function PageIntake({ pathway, setPathway, notes, setNotes, files, setFiles, onC
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
             />
-            {touched && !notesValid && <p className="mf-error">Add the visit note (at least 10 characters) before creating the case.</p>}
+            {touched && !notesValid && <p className="mf-error">Add the visit notes before creating the case.</p>}
           </Field>
 
           <Field label="Supporting documents">
@@ -610,15 +601,14 @@ function PageIntake({ pathway, setPathway, notes, setNotes, files, setFiles, onC
           <SummaryRow k="Notes" v={`${notes.trim() ? notes.trim().split(/\s+/).length : 0} words`} />
           <SummaryRow k="Attachments" v={files.length} />
           <SummaryRow k="Status" v={<StatusPillSmall color="amber">Draft</StatusPillSmall>} />
-          <button className="mf-primary-btn full" disabled={!canSubmit} onClick={submit}>
-            {busy ? <><Loader2 size={15} className="mf-spin" /> Creating…</> : <>Create case <ArrowRight size={15} /></>}
+          <button className="mf-primary-btn full" disabled={!canSubmit} onClick={() => { setTouched(true); if (canSubmit) onCreate(); }}>
+            Create case <ArrowRight size={15} />
           </button>
-          {err && <p className="mf-error" style={{ marginTop: 8 }}>{err}</p>}
           <p className="mf-tiny-note">A physician reviews and approves everything before anything is sent.</p>
         </SummaryCard>
       </div>
 
-      <PageNav onBack={onBack} onNext={submit} nextLabel={busy ? "Creating…" : "Create case & run extraction"} />
+      <PageNav onBack={onBack} onNext={() => { setTouched(true); if (canSubmit) onCreate(); }} nextLabel="Create case & run extraction" />
     </PageShell>
   );
 }
@@ -627,40 +617,13 @@ function PageIntake({ pathway, setPathway, notes, setNotes, files, setFiles, onC
    Page: AI extraction
 ──────────────────────────────────────────────────────────────────────── */
 
-// The MedGemma extraction contract (see ai-service). List fields default to [],
-// scalar fields to null. `vital_signs` can arrive as [] when empty (PHP JSON).
-const isEmpty = (v) =>
-  v == null ||
-  (Array.isArray(v) && v.length === 0) ||
-  (typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0) ||
-  (typeof v === "string" && v.trim() === "");
-
-function useElapsed(active, since) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [active]);
-  const start = since ? new Date(since).getTime() : now;
-  const secs = Math.max(0, Math.round((now - start) / 1000));
-  const m = Math.floor(secs / 60);
-  const s = secs % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
-}
-
-function PageAI({ extraction, note, onNext, onRetry }) {
+function PageAI({ onNext }) {
   const [showOriginal, setShowOriginal] = useState(false);
-  const status = extraction?.status ?? "queued";
-  const running = status === "queued" || status === "running";
-  const elapsed = useElapsed(running, extraction?.created_at);
-  const data = extraction?.result?.data ?? null;
-  const reasoning = extraction?.result?.reasoning;
 
   return (
     <PageShell
       title="AI extraction result"
-      subhead="What MedGemma pulled from the note — only what is explicitly stated. Anything not in the note stays null; nothing here is inferred."
+      subhead="What the AI/NLP layer pulled from the note, with the exact source phrase behind every value. Anything not stated stays null — nothing here is inferred."
       headerRight={
         <button className="mf-toggle-link" onClick={() => setShowOriginal((v) => !v)}>
           {showOriginal ? <EyeOff size={15} /> : <Eye size={15} />} {showOriginal ? "Hide" : "View"} original note
@@ -670,85 +633,44 @@ function PageAI({ extraction, note, onNext, onRetry }) {
       {showOriginal && (
         <div className="mf-note-box">
           <p className="mf-note-box-title">Original visit note, as pasted at intake</p>
-          <pre className="mf-mono-block">{note || "(no note)"}</pre>
+          <pre className="mf-mono-block">{EXAMPLE_NOTE}</pre>
         </div>
       )}
 
-      {running && (
-        <div className="mf-note-box" style={{ textAlign: "center", padding: "40px 24px" }}>
-          <Loader2 size={26} className="mf-spin" style={{ color: "var(--accent, #4f46e5)" }} />
-          <p className="mf-note-box-title" style={{ marginTop: 12 }}>
-            MedGemma is reading the note…
-          </p>
-          <p className="mf-tiny-note">
-            CPU inference on the reference machine takes ~10–30 minutes. This page
-            polls the backend every 5 seconds — you can leave it open. Elapsed: {elapsed}
-          </p>
-        </div>
-      )}
+      <div className="mf-field-grid">
+        <ExtractField label="Patient" value={`${EXTRACTED.patient.age}-year-old ${EXTRACTED.patient.gender}`} evidence={EXTRACTED.patient.evidence} />
+        <ExtractField label="Symptom" value={`${EXTRACTED.symptom.name} — ${EXTRACTED.symptom.location}, ${EXTRACTED.symptom.duration}`} evidence={EXTRACTED.symptom.evidence} />
+        <ExtractField label="Aggravating factor" value={EXTRACTED.aggravating.value} evidence={EXTRACTED.aggravating.evidence} />
+        <ExtractField label="Imaging" value={`${EXTRACTED.imaging.type}: ${EXTRACTED.imaging.finding}`} evidence={EXTRACTED.imaging.evidence} />
+        <ExtractField label="Trauma" value={EXTRACTED.trauma.value ? "Reported" : "Denied"} evidence={EXTRACTED.trauma.evidence} />
+        <ExtractField label="Medications" isNull />
+        <ExtractField label="Previous treatments" isNull />
+        <ExtractField label="Diagnosis" isNull />
+      </div>
 
-      {status === "failed" && (
-        <div className="mf-info-strip" style={{ borderColor: "#dc2626", color: "#b91c1c" }}>
-          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-          <div>
-            Extraction failed: {extraction?.error?.message || "unknown error"}
-            {extraction?.error?.code ? ` (${extraction.error.code})` : ""}.
-            <button className="mf-inline-link" style={{ marginLeft: 8 }} onClick={onRetry}>
-              Back to intake
-            </button>
-          </div>
-        </div>
-      )}
+      <div className="mf-info-strip">
+        <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+        The AI never fills in a diagnosis, treatment need, or referral decision on its own. If it isn't written in the note, it stays null — a clinician decides what it means.
+      </div>
 
-      {status === "succeeded" && data && (
-        <>
-          <div className="mf-field-grid">
-            <ExtractField label="Age" value={data.age != null ? `${data.age}` : null} />
-            <ExtractField label="Sex" value={data.sex} />
-            <ExtractField label="Chief complaint" value={data.chief_complaint} />
-            <ExtractField label="Past medical history" value={fmtList(data.past_medical_history)} />
-            <ExtractField label="Medications" value={fmtList(data.medications)} />
-            <ExtractField label="Relevant findings" value={fmtList(data.relevant_findings)} />
-            <ExtractField label="Vital signs" value={fmtVitals(data.vital_signs)} />
-          </div>
-
-          {reasoning && (
-            <Accordion title="Model reasoning (internal 'thought')">
-              <pre className="mf-mono-block">{reasoning}</pre>
-            </Accordion>
-          )}
-
-          <div className="mf-info-strip">
-            <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-            MedGemma never fills in a diagnosis, treatment need, or referral decision. If it
-            isn't written in the note, it stays null — a clinician decides what it means.
-          </div>
-
-          <div className="mf-actions">
-            <button className="mf-primary-btn" onClick={onNext}>See structured data <ArrowRight size={15} /></button>
-          </div>
-        </>
-      )}
+      <div className="mf-actions">
+        <button className="mf-primary-btn" onClick={onNext}>See structured data <ArrowRight size={15} /></button>
+      </div>
     </PageShell>
   );
 }
 
-const fmtList = (v) => (Array.isArray(v) && v.length ? v.join(", ") : null);
-const fmtVitals = (v) => {
-  if (!v || Array.isArray(v) || typeof v !== "object") return null;
-  const entries = Object.entries(v);
-  return entries.length ? entries.map(([k, val]) => `${k}: ${val}`).join(" · ") : null;
-};
-
-function ExtractField({ label, value }) {
-  const missing = isEmpty(value);
+function ExtractField({ label, value, evidence, isNull }) {
   return (
-    <div className={`mf-field-card${missing ? " null" : ""}`}>
+    <div className={`mf-field-card${isNull ? " null" : ""}`}>
       <p className="mf-field-key">{label}</p>
-      {missing ? (
+      {isNull ? (
         <span className="mf-null">Not stated in note</span>
       ) : (
-        <p className="mf-field-value">{value}</p>
+        <>
+          <p className="mf-field-value">{value}</p>
+          <span className="mf-evidence">&ldquo;{evidence}&rdquo;</span>
+        </>
       )}
     </div>
   );
@@ -758,52 +680,56 @@ function ExtractField({ label, value }) {
    Page: Structured data
 ──────────────────────────────────────────────────────────────────────── */
 
-function syntaxHighlight(json) {
-  const escaped = json.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return escaped.replace(
-    /("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
-    (match) => {
-      let cls = "mf-json-number";
-      if (/^"/.test(match)) cls = /:$/.test(match) ? "mf-json-key" : "mf-json-string";
-      else if (/true|false/.test(match)) cls = "mf-json-boolean";
-      else if (/null/.test(match)) cls = "mf-json-null";
-      return `<span class="${cls}">${match}</span>`;
-    }
-  );
-}
+const STRUCTURED_JSON = {
+  case_id: CASE_ID,
+  patient: EXTRACTED.patient,
+  symptoms: [EXTRACTED.symptom],
+  aggravating_factors: [EXTRACTED.aggravating],
+  imaging: [EXTRACTED.imaging],
+  trauma: EXTRACTED.trauma,
+  medications: null,
+  previous_treatments: null,
+  diagnosis: null,
+  classification: { body_system: CLASSIFICATION.bodySystem, body_part: CLASSIFICATION.bodyPart, suggested_workflow: CLASSIFICATION.workflow },
+};
 
-// Flatten a structured object into { path, type, value } rows for the schema tab.
-function flattenSchema(value, path = "") {
-  if (value === null) return [{ path, type: "null", value: "null" }];
-  if (Array.isArray(value)) {
-    if (value.length === 0) return [{ path, type: "array", value: "[]" }];
-    return value.flatMap((item, i) => flattenSchema(item, `${path}[${i}]`));
-  }
-  if (typeof value === "object") {
-    return Object.entries(value).flatMap(([k, v]) => flattenSchema(v, path ? `${path}.${k}` : k));
-  }
-  const type = typeof value === "number" ? "number" : typeof value === "boolean" ? "boolean" : "string";
-  return [{ path, type, value: type === "string" ? `"${value}"` : String(value) }];
-}
+// Blank item templates for the "Editable fields" tab — the shapes the clinician
+// can add when the AI missed something.
+const BLANK_ITEM = {
+  symptoms: { name: "", location: "", duration: "", evidence: "" },
+  aggravating_factors: { value: "", evidence: "" },
+  imaging: { type: "", finding: "", evidence: "" },
+};
 
-function PageStructured({ extraction, onNext, onBack }) {
+const LIST_FIELDS = {
+  symptoms: [
+    { key: "name", label: "Symptom" },
+    { key: "location", label: "Location" },
+    { key: "duration", label: "Duration" },
+  ],
+  aggravating_factors: [{ key: "value", label: "Factor" }],
+  imaging: [
+    { key: "type", label: "Modality" },
+    { key: "finding", label: "Finding" },
+  ],
+};
+
+function PageStructured({ onNext, onBack }) {
   const [tab, setTab] = useState("json");
-  const data = extraction?.status === "succeeded" ? extraction?.result?.data : null;
+  // One source of truth for all three tabs; starts from the AI/validation output.
+  const [data, setData] = useState(() => JSON.parse(JSON.stringify(STRUCTURED_JSON)));
+  const [dirty, setDirty] = useState(false);
 
-  if (!data) {
-    return (
-      <PageShell
-        title="Structured medical data"
-        subhead="The exact JSON MedGemma produced — the machine contract passed to the downstream pipeline."
-      >
-        <div className="mf-info-strip">
-          <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-          No extraction result yet. Run the extraction on the previous step first.
-        </div>
-        <PageNav onBack={onBack} />
-      </PageShell>
-    );
-  }
+  const edit = (mutate) => {
+    setData((prev) => {
+      const next = JSON.parse(JSON.stringify(prev));
+      mutate(next);
+      return next;
+    });
+    setDirty(true);
+  };
+
+  const reset = () => { setData(JSON.parse(JSON.stringify(STRUCTURED_JSON))); setDirty(false); };
 
   const jsonString = JSON.stringify(data, null, 2);
   const schemaRows = flattenSchema(data);
@@ -811,17 +737,15 @@ function PageStructured({ extraction, onNext, onBack }) {
   return (
     <PageShell
       title="Structured medical data"
-      subhead="The exact JSON MedGemma produced — the machine contract passed to the downstream pipeline."
-      headerRight={
-        <span className="mf-tiny-note">
-          {extraction.token_count ? `${extraction.token_count} tokens` : null}
-          {extraction.duration_seconds ? ` · ${Math.round(extraction.duration_seconds)}s` : null}
-        </span>
-      }
+      subhead="The exact output the AI hands to Clinical Validation — the machine contract, not the narrative summary."
+      headerRight={dirty ? <button className="mf-toggle-link" onClick={reset}><RefreshCw size={14} /> Reset to AI output</button> : null}
     >
       <div className="mf-tabs">
         <button className={`mf-tab${tab === "json" ? " active" : ""}`} onClick={() => setTab("json")}>Raw JSON</button>
         <button className={`mf-tab${tab === "schema" ? " active" : ""}`} onClick={() => setTab("schema")}>Schema table</button>
+        <button className={`mf-tab${tab === "fields" ? " active" : ""}`} onClick={() => setTab("fields")}>
+          Editable fields{dirty ? <span className="mf-tab-dot" /> : null}
+        </button>
       </div>
 
       {tab === "json" && (
@@ -838,6 +762,8 @@ function PageStructured({ extraction, onNext, onBack }) {
           </table>
         </div>
       )}
+
+      {tab === "fields" && <StructuredFields data={data} edit={edit} />}
 
       <PageNav onBack={onBack} onNext={onNext} nextLabel="Run clinical validation" />
     </PageShell>
@@ -856,6 +782,148 @@ function SchemaRow({ path, type, value }) {
   );
 }
 
+/* The "Editable fields" tab: the AI's validated structured result rendered as
+   inputs so a clinician can correct it before it goes to Clinical Validation.
+   Every edit flows back into the same object behind Raw JSON / Schema table. */
+function StructuredFields({ data, edit }) {
+  const setField = (path, val) => edit((d) => {
+    const keys = path.split(".");
+    let ref = d;
+    for (let i = 0; i < keys.length - 1; i++) ref = ref[keys[i]];
+    ref[keys[keys.length - 1]] = val;
+  });
+
+  const setListField = (list, i, key, val) => edit((d) => { d[list][i][key] = val; });
+  const addItem = (list) => edit((d) => { d[list] = [...(d[list] || []), { ...BLANK_ITEM[list] }]; });
+  const removeItem = (list, i) => edit((d) => { d[list].splice(i, 1); });
+
+  // string|null and string[]|null fields — empty input means null.
+  const setNullable = (path, raw, asList) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return setField(path, null);
+    setField(path, asList ? trimmed.split(",").map((s) => s.trim()).filter(Boolean) : trimmed);
+  };
+  const nullableValue = (v) => (v == null ? "" : Array.isArray(v) ? v.join(", ") : v);
+
+  return (
+    <div className="mf-fields-view">
+      <div className="mf-info-strip">
+        <Pencil size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+        Correct anything the AI got wrong here. This is the last point a clinician can edit the structured data — Clinical Validation runs on exactly what these fields contain.
+      </div>
+
+      <SectionLabel>Patient</SectionLabel>
+      <Card>
+        <div className="mf-input-grid">
+          <Field label="Age">
+            <input className="mf-input" type="number" value={data.patient.age ?? ""}
+              onChange={(e) => setField("patient.age", e.target.value === "" ? null : Number(e.target.value))} />
+          </Field>
+          <Field label="Gender">
+            <input className="mf-input" value={data.patient.gender ?? ""}
+              onChange={(e) => setField("patient.gender", e.target.value || null)} />
+          </Field>
+        </div>
+        <Field label="Evidence (source phrase)">
+          <input className="mf-input" value={data.patient.evidence ?? ""}
+            onChange={(e) => setField("patient.evidence", e.target.value || null)} />
+        </Field>
+      </Card>
+
+      {["symptoms", "aggravating_factors", "imaging"].map((list) => {
+        const title = { symptoms: "Symptom", aggravating_factors: "Aggravating factor", imaging: "Imaging" }[list];
+        const items = data[list] || [];
+        return (
+          <div key={list}>
+            <div className="mf-fields-list-head">
+              <SectionLabel>{title === "Imaging" ? "Imaging" : `${title}s`}</SectionLabel>
+              <button className="mf-mini-btn" onClick={() => addItem(list)}><Plus size={12} /> Add</button>
+            </div>
+            {items.length === 0 && <Card><span className="mf-null">None extracted</span></Card>}
+            {items.map((item, i) => (
+              <Card key={i}>
+                <div className="mf-fields-item-head">
+                  <span className="mf-fields-item-label">{title} {i + 1}</span>
+                  <button className="mf-mini-btn ghost" onClick={() => removeItem(list, i)}><X size={12} /> Remove</button>
+                </div>
+                <div className="mf-input-grid">
+                  {LIST_FIELDS[list].map((f) => (
+                    <Field key={f.key} label={f.label}>
+                      <input className="mf-input" value={item[f.key] ?? ""}
+                        onChange={(e) => setListField(list, i, f.key, e.target.value)} />
+                    </Field>
+                  ))}
+                </div>
+                <Field label="Evidence (source phrase)">
+                  <input className="mf-input" value={item.evidence ?? ""}
+                    onChange={(e) => setListField(list, i, "evidence", e.target.value)} />
+                </Field>
+              </Card>
+            ))}
+          </div>
+        );
+      })}
+
+      <SectionLabel>Trauma</SectionLabel>
+      <Card>
+        <div className="mf-input-grid">
+          <Field label="Status">
+            <div className="mf-select-wrap">
+              <select className="mf-select" value={String(data.trauma?.value ?? "null")}
+                onChange={(e) => edit((d) => {
+                  d.trauma = d.trauma || { value: null, evidence: null };
+                  d.trauma.value = e.target.value === "null" ? null : e.target.value === "true";
+                })}>
+                <option value="false">Denied</option>
+                <option value="true">Reported</option>
+                <option value="null">Not stated</option>
+              </select>
+              <ChevronDown size={16} className="mf-select-icon" />
+            </div>
+          </Field>
+          <Field label="Evidence (source phrase)">
+            <input className="mf-input" value={data.trauma?.evidence ?? ""}
+              onChange={(e) => edit((d) => { d.trauma = d.trauma || { value: null, evidence: null }; d.trauma.evidence = e.target.value || null; })} />
+          </Field>
+        </div>
+      </Card>
+
+      <SectionLabel>Not stated in the note</SectionLabel>
+      <Card>
+        <Field label="Medications (comma-separated)">
+          <input className="mf-input" placeholder="null — add only if documented" value={nullableValue(data.medications)}
+            onChange={(e) => setNullable("medications", e.target.value, true)} />
+        </Field>
+        <Field label="Previous treatments (comma-separated)">
+          <input className="mf-input" placeholder="null — add only if documented" value={nullableValue(data.previous_treatments)}
+            onChange={(e) => setNullable("previous_treatments", e.target.value, true)} />
+        </Field>
+        <Field label="Diagnosis">
+          <input className="mf-input" placeholder="null — a clinician assigns this, not the AI" value={nullableValue(data.diagnosis)}
+            onChange={(e) => setNullable("diagnosis", e.target.value, false)} />
+        </Field>
+      </Card>
+
+      <SectionLabel>Classification</SectionLabel>
+      <Card>
+        <div className="mf-input-grid">
+          <Field label="Body system">
+            <input className="mf-input" value={data.classification.body_system ?? ""}
+              onChange={(e) => setField("classification.body_system", e.target.value || null)} />
+          </Field>
+          <Field label="Body part">
+            <input className="mf-input" value={data.classification.body_part ?? ""}
+              onChange={(e) => setField("classification.body_part", e.target.value || null)} />
+          </Field>
+        </div>
+        <Field label="Suggested workflow">
+          <input className="mf-input" value={data.classification.suggested_workflow ?? ""}
+            onChange={(e) => setField("classification.suggested_workflow", e.target.value || null)} />
+        </Field>
+      </Card>
+    </div>
+  );
+}
 
 /* ────────────────────────────────────────────────────────────────────────
    Page: Clinical validation

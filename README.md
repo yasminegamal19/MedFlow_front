@@ -10,9 +10,7 @@ npm run dev
 ```
 
 Opens at http://localhost:5173. The dev server proxies `/api` to the Laravel
-backend at `http://localhost:8010` (see `vite.config.js` / `.env`), so the
-backend and `ai-service` must be running for the AI extraction step — see the
-repo root `README.md`.
+backend at `http://localhost:8010` (see `vite.config.js` / `.env`).
 
 ## Build
 
@@ -23,27 +21,32 @@ npm run build && npm run preview
 ## Structure
 
 - `src/main.jsx` — entry point, mounts `<MedFlowApp />`
+- `src/MedFlowApp.jsx` — the wizard: intake → AI extraction → structured data →
+  clinical validation → business rules → referral generation → doctor review.
+  **All static / mock data** — click through the whole flow with no backend.
+- `src/LiveExtraction.jsx` — the two **live** nav tabs (`LiveExtract`, `LiveData`)
 - `src/api.js` — backend client: `submitExtraction()`, `getExtraction()`
-- `src/MedFlowApp.jsx` — the whole app: intake → **AI extraction (live)** →
-  structured data → clinical validation → business rules → referral generation →
-  doctor review. Styling is self-contained (inline `<style>` + Google Fonts).
+- `src/format.js` — shared JSON pretty-print + schema-flatten helpers
 - `src/index.css` — minimal global reset
 
-### What's live vs. mocked
+### Static wizard vs. live tabs
 
-The **intake → AI extraction → structured data** steps are wired to the real
-backend:
+The 8-step wizard (`Patient info` … `Doctor review`) is a **self-contained
+static demo** — every value is fixed mock data in `MedFlowApp.jsx`.
 
-- `PageIntake` submits the pasted note via `POST /api/extractions`.
-- `MedFlowApp` polls `GET /api/extractions/{id}` every 5s.
-- `PageAI` shows a progress state while the job runs (CPU inference is
-  10–30 min), then renders the MedGemma contract fields (`age`, `sex`,
+Two extra nav tabs — **"AI extraction · live"** and **"Structured JSON · live"** —
+are the real thing:
+
+- `LiveExtract` submits a note via `POST /api/extractions`, then
+  `MedFlowApp` polls `GET /api/extractions/{id}` every 5s.
+- While the job runs (CPU inference, 10–30 min) it shows a progress state; the
+  job id is saved to `localStorage` so a refresh resumes.
+- On success it renders the MedGemma contract fields (`age`, `sex`,
   `chief_complaint`, `past_medical_history`, `medications`, `vital_signs`,
-  `relevant_findings`).
-- `PageStructured` shows the raw result JSON and a schema table.
+  `relevant_findings`); `LiveData` shows the raw JSON + a schema table.
 
-Everything from **clinical validation** onward is still mock data inside
-`MedFlowApp.jsx`.
+These tabs need the backend and `ai-service` running — see the repo root
+`README.md`. The static wizard does not.
 
 ## Config
 
