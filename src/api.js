@@ -211,6 +211,58 @@ export function listWorkflowTemplates() {
     .then((b) => b.data);
 }
 
+/** Specializations -> pathways -> conditions/criteria/red flags/imaging/actions/rules. Read-only. */
+export function listClinicalPathways() {
+  return fetch(`${BASE}/clinical-pathways`, { headers: headers() })
+    .then(parse)
+    .then((b) => b.data);
+}
+
+/** The pathways Clinical Assessment can render — for the intake picker. */
+export function listPathways() {
+  return fetch(`${BASE}/pathways`, { headers: headers() })
+    .then(parse)
+    .then((b) => b.data);
+}
+
+/** A pathway's active-version field definition (sections -> fields ->
+ * options/AI-fill mapping) — the JSON meant to tell an AI step which fields
+ * exist and how to fill them. */
+export function getPathwayDefinition(pathwayId) {
+  return fetch(`${BASE}/pathways/${pathwayId}`, { headers: headers() })
+    .then(parse)
+    .then((b) => b.data);
+}
+
+/** The full Alberta referral-pathway catalog (entry doors, program
+ * contacts, clinical-pathway names, emergency/urgent indications, and
+ * every reason-for-referral row) — read-only, seeded from both provincial
+ * pathway PDFs. See database/seeders/ReferralRoutingSeeder.php. */
+export function getReferralRoutingCatalog() {
+  return fetch(`${BASE}/referral-routing/catalog`, { headers: headers() })
+    .then(parse)
+    .then((b) => b.data);
+}
+
+/** A case's saved referral-routing decision, or null if none yet. */
+export function getCaseReferralRouting(caseId) {
+  return fetch(`${BASE}/cases/${caseId}/referral-routing`, { headers: headers() })
+    .then(parse)
+    .then((b) => b.data);
+}
+
+/** Persists (creates or updates) a case's referral-routing decision — the
+ * "action" behind the Referral Routing step's Continue button. */
+export function submitCaseReferralRouting(caseId, data) {
+  return fetch(`${BASE}/cases/${caseId}/referral-routing`, {
+    method: "POST",
+    headers: headers({ "content-type": "application/json" }),
+    body: JSON.stringify(data),
+  })
+    .then(parse)
+    .then((b) => b.data);
+}
+
 export function createPatient(data) {
   return fetch(`${BASE}/patients`, {
     method: "POST",
@@ -247,6 +299,17 @@ export function createCase(data, files = []) {
     headers: headers({ "content-type": "application/json" }),
     body: JSON.stringify(data),
   })
+    .then(parse)
+    .then((b) => b.data);
+}
+
+/** @param {{organizationId?: string, status?: string}} [filters] */
+export function listCases({ organizationId, status } = {}) {
+  const params = new URLSearchParams();
+  if (organizationId) params.set("organization_id", organizationId);
+  if (status) params.set("status", status);
+  const qs = params.toString();
+  return fetch(`${BASE}/cases${qs ? `?${qs}` : ""}`, { headers: headers() })
     .then(parse)
     .then((b) => b.data);
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Pencil, Trash2, X, Check, ChevronDown, AlertTriangle } from "lucide-react";
+import { Plus, Pencil, Trash2, X, Check, ChevronDown, AlertTriangle, Search } from "lucide-react";
 import { tableResources } from "./api.js";
 import { TABLE_CONFIGS, EDITABLE_TABLE_KEYS, rowLabel } from "./dataTables.js";
 
@@ -55,6 +55,7 @@ function Row({ tableKey, columns, row, rowsByTable, onSaved, onDeleted }) {
   const [error, setError] = useState(null);
   const [fieldErrors, setFieldErrors] = useState({});
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const displayColumns = columns.filter((c) => !c.createOnly);
 
   const set = (key, v) => setValues((prev) => ({ ...prev, [key]: v }));
 
@@ -91,51 +92,48 @@ function Row({ tableKey, columns, row, rowsByTable, onSaved, onDeleted }) {
     }
   };
 
-  if (!editing) {
+  if (editing) {
     return (
-      <div className="mf-field-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
-        <div style={{ minWidth: 0 }}>
-          <p className="mf-field-value" style={{ fontWeight: 600, marginBottom: 4 }}>{rowLabel(tableKey, row)}</p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px" }}>
-            {columns.filter((c) => !c.createOnly).map((c) => (
-              <span key={c.key} style={{ fontSize: 11.5, color: "var(--ink-soft)" }}>
-                {c.label}: <b style={{ color: "var(--ink)" }}>{formatCellValue(c, row[c.key], rowsByTable)}</b>
-              </span>
-            ))}
+      <tr>
+        <td colSpan={displayColumns.length + 1} className="db-ptable-edit-cell">
+          <FieldsForm columns={columns} values={values} set={set} fieldErrors={fieldErrors} rowsByTable={rowsByTable} isCreate={false} />
+          {error && <p className="mf-error">{error}</p>}
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button className="mf-primary-btn" onClick={save} disabled={saving}>
+              {saving ? "Saving…" : <><Check size={14} /> Save</>}
+            </button>
+            <button className="mf-ghost-btn" onClick={() => { setEditing(false); setValues(rowToValues(row, columns)); setError(null); }}>
+              <X size={14} /> Cancel
+            </button>
           </div>
-        </div>
-        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-          {confirmingDelete ? (
-            <>
-              <button className="mf-mini-btn ghost" style={{ color: "var(--clay)" }} onClick={del} disabled={saving}>
-                {saving ? "…" : "Confirm delete"}
-              </button>
-              <button className="mf-mini-btn ghost" onClick={() => setConfirmingDelete(false)}>Cancel</button>
-            </>
-          ) : (
-            <>
-              <button className="mf-mini-btn ghost" onClick={() => setEditing(true)} aria-label="Edit"><Pencil size={13} /></button>
-              <button className="mf-mini-btn ghost" onClick={() => setConfirmingDelete(true)} aria-label="Delete"><Trash2 size={13} /></button>
-            </>
-          )}
-        </div>
-      </div>
+        </td>
+      </tr>
     );
   }
 
   return (
-    <div className="mf-card">
-      <FieldsForm columns={columns} values={values} set={set} fieldErrors={fieldErrors} rowsByTable={rowsByTable} isCreate={false} />
-      {error && <p className="mf-error">{error}</p>}
-      <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-        <button className="mf-primary-btn" onClick={save} disabled={saving}>
-          {saving ? "Saving…" : <><Check size={14} /> Save</>}
-        </button>
-        <button className="mf-ghost-btn" onClick={() => { setEditing(false); setValues(rowToValues(row, columns)); setError(null); }}>
-          <X size={14} /> Cancel
-        </button>
-      </div>
-    </div>
+    <tr>
+      {displayColumns.map((c) => (
+        <td key={c.key}>{renderCellValue(c, row[c.key], rowsByTable)}</td>
+      ))}
+      <td>
+        <div className="db-ptable-actions-cell">
+          {confirmingDelete ? (
+            <>
+              <button className="db-ptable-text-btn danger" onClick={del} disabled={saving}>
+                {saving ? "…" : "Confirm delete"}
+              </button>
+              <button className="db-ptable-text-btn" onClick={() => setConfirmingDelete(false)}>Cancel</button>
+            </>
+          ) : (
+            <>
+              <button className="db-ptable-icon-btn" onClick={() => setEditing(true)} aria-label="Edit"><Pencil size={13} /></button>
+              <button className="db-ptable-icon-btn delete" onClick={() => setConfirmingDelete(true)} aria-label="Delete"><Trash2 size={13} /></button>
+            </>
+          )}
+        </div>
+      </td>
+    </tr>
   );
 }
 
@@ -257,12 +255,31 @@ function formatCellValue(column, value, rowsByTable) {
   return String(value);
 }
 
+/** Table-cell JSX for a column — pills for booleans/selects, mono for code-like values. */
+function renderCellValue(column, value, rowsByTable) {
+  if (value == null || value === "") return <span className="db-ptable-code">—</span>;
+  if (column.type === "boolean") {
+    return <span className={`db-status db-status-${value ? "sage" : "neutral"}`}>{value ? "Yes" : "No"}</span>;
+  }
+  if (column.type === "select") return <span className="db-status db-status-blue">{value}</span>;
+  if (column.type === "fk") {
+    const row = (rowsByTable[column.fkTable] || []).find((r) => r.id === value);
+    return row ? rowLabel(column.fkTable, row) : <span className="db-ptable-code">{value.slice(0, 8)}…</span>;
+  }
+  if (column.type === "json") return <span className="db-ptable-code">{Array.isArray(value) ? `[${value.length}]` : "{…}"}</span>;
+  if (column.type === "password") return <span className="db-ptable-code">••••••••</span>;
+  if (column.key === "code") return <span className="db-ptable-strong">{value}</span>;
+  if (typeof value === "string" && value.length > 60) return value.slice(0, 60) + "…";
+  return String(value);
+}
+
 export default function TableEditor() {
   const [activeTable, setActiveTable] = useState(EDITABLE_TABLE_KEYS[0]);
   const [rowsByTable, setRowsByTable] = useState({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [addingNew, setAddingNew] = useState(false);
+  const [search, setSearch] = useState("");
 
   const loadAll = async () => {
     setLoading(true);
@@ -280,11 +297,21 @@ export default function TableEditor() {
   };
 
   useEffect(() => { loadAll(); }, []);
+  useEffect(() => { setSearch(""); setAddingNew(false); }, [activeTable]);
 
   const config = TABLE_CONFIGS[activeTable];
   const rows = rowsByTable[activeTable] || [];
+  const displayColumns = useMemo(() => config.columns.filter((c) => !c.createOnly), [config]);
 
   const patch = (key, updater) => setRowsByTable((prev) => ({ ...prev, [key]: updater(prev[key] || []) }));
+
+  const filteredRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((row) =>
+      displayColumns.some((c) => String(formatCellValue(c, row[c.key], rowsByTable)).toLowerCase().includes(q)),
+    );
+  }, [rows, search, displayColumns, rowsByTable]);
 
   return (
     <div>
@@ -292,7 +319,7 @@ export default function TableEditor() {
         {EDITABLE_TABLE_KEYS.map((key) => (
           <button type="button" key={key}
             className={`mf-mini-btn${activeTable === key ? "" : " ghost"}`}
-            onClick={() => { setActiveTable(key); setAddingNew(false); }}>
+            onClick={() => setActiveTable(key)}>
             {TABLE_CONFIGS[key].label} <span style={{ opacity: 0.7 }}>({(rowsByTable[key] || []).length})</span>
           </button>
         ))}
@@ -304,31 +331,64 @@ export default function TableEditor() {
       )}
 
       {!loading && !loadError && (
-        <>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <p className="mf-section-label" style={{ margin: 0 }}>{config.label} ({rows.length})</p>
-            {!addingNew && (
-              <button className="mf-mini-btn" onClick={() => setAddingNew(true)}><Plus size={13} /> Add</button>
-            )}
+        <div className="db-ptable-card">
+          <div className="db-ptable-head">
+            <div className="db-card-title">
+              {config.label} <span style={{ fontWeight: 500, color: "var(--ink-soft)" }}>({rows.length})</span>
+            </div>
+          </div>
+
+          <div className="db-ptable-toolbar">
+            <div className="db-ptable-search">
+              <Search size={14} />
+              <input
+                type="text"
+                placeholder={`Search ${config.label.toLowerCase()}…`}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
+            <div className="db-ptable-filters">
+              {!addingNew && (
+                <button className="db-ptable-btn" onClick={() => setAddingNew(true)}>
+                  <Plus size={13} /> Add {config.label.replace(/s$/, "")}
+                </button>
+              )}
+            </div>
           </div>
 
           {addingNew && (
-            <div style={{ marginBottom: 10 }}>
+            <div style={{ padding: "0 20px 18px" }}>
               <NewRow tableKey={activeTable} columns={config.columns} rowsByTable={rowsByTable}
                 onCreated={(created) => { patch(activeTable, (r) => [...r, created]); setAddingNew(false); }}
                 onCancel={() => setAddingNew(false)} />
             </div>
           )}
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {rows.map((row) => (
-              <Row key={row.id} tableKey={activeTable} columns={config.columns} row={row} rowsByTable={rowsByTable}
-                onSaved={(updated) => patch(activeTable, (r) => r.map((x) => (x.id === updated.id ? updated : x)))}
-                onDeleted={(id) => patch(activeTable, (r) => r.filter((x) => x.id !== id))} />
-            ))}
-            {rows.length === 0 && <p className="mf-tiny-note">No {config.label.toLowerCase()} yet.</p>}
-          </div>
-        </>
+          {rows.length === 0 ? (
+            <div className="db-ptable-empty">No {config.label.toLowerCase()} yet.</div>
+          ) : filteredRows.length === 0 ? (
+            <div className="db-ptable-empty">No {config.label.toLowerCase()} match your search.</div>
+          ) : (
+            <div className="db-ptable-scroll">
+              <table className="db-ptable">
+                <thead>
+                  <tr>
+                    {displayColumns.map((c) => <th key={c.key}>{c.label}</th>)}
+                    <th className="db-ptable-actions-head">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRows.map((row) => (
+                    <Row key={row.id} tableKey={activeTable} columns={config.columns} row={row} rowsByTable={rowsByTable}
+                      onSaved={(updated) => patch(activeTable, (r) => r.map((x) => (x.id === updated.id ? updated : x)))}
+                      onDeleted={(id) => patch(activeTable, (r) => r.filter((x) => x.id !== id))} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

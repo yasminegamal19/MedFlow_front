@@ -91,14 +91,24 @@ export default function AlbertaRoutingPage({ user, onLogout, onBack }) {
         .ab-chip { display: inline-block; background: var(--blue-soft); color: var(--blue-dark); font-size: 12px;
           padding: 3px 9px; border-radius: 999px; }
         .ab-chip-note { color: var(--ink-soft); }
-        .ab-hub-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
-        .ab-hub-card { background: var(--paper-raised); border: 1px solid var(--line); border-radius: var(--r-md);
-          padding: 16px 18px; box-shadow: var(--shadow-xs); }
-        .ab-hub-card h3 { margin: 0 0 2px; font-size: 15.5px; font-family: 'Space Grotesk', sans-serif; }
-        .ab-hub-meta { font-size: 12px; color: var(--ink-soft); margin-bottom: 10px; }
-        .ab-hub-card .ab-section-label { font-size: 11px; font-weight: 600; color: var(--ink-soft);
-          letter-spacing: 0.04em; text-transform: uppercase; margin: 10px 0 6px; }
-        .ab-hub-towns { display: flex; flex-wrap: wrap; gap: 5px; }
+
+        /* Premium table card — same language as the dashboard's Recent cases table */
+        .db-ptable-card { background: var(--paper-raised); border: 1px solid var(--line); border-radius: var(--r-lg);
+          box-shadow: var(--shadow-sm); overflow: hidden; }
+        .db-ptable-head { padding: 18px 20px 14px; border-bottom: 1px solid var(--line); }
+        .db-ptable-scroll { overflow-x: auto; }
+        .db-ptable { width: 100%; border-collapse: collapse; font-size: 13px; }
+        .db-ptable th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+          font-weight: 700; color: var(--ink-soft); background: var(--paper); padding: 11px 20px;
+          border-bottom: 1px solid var(--line); }
+        .db-ptable td { padding: 13px 20px; border-bottom: 1px solid var(--line-soft); color: var(--ink); vertical-align: top; }
+        .db-ptable tbody tr { transition: background-color .14s var(--ease); }
+        .db-ptable tbody tr:hover { background: var(--blue-soft); }
+        .db-ptable tbody tr:last-child td { border-bottom: none; }
+        .db-ptable.wrap th, .db-ptable.wrap td { white-space: normal; }
+        .db-ptable-strong { font-weight: 700; color: var(--ink); font-family: 'Space Grotesk', sans-serif; font-size: 13.5px; }
+        .db-ptable-rule { font-size: 12.5px; color: var(--ink-soft); max-width: 260px; }
+        .db-ptable-chip-list { display: flex; flex-wrap: wrap; gap: 5px; max-width: 360px; }
       `}</style>
 
       <div className="ab-topbar">
@@ -152,19 +162,45 @@ export default function AlbertaRoutingPage({ user, onLogout, onBack }) {
           <ResolvedHubCard result={result} query={query} />
         </div>
 
-        <div className="ab-hub-grid">
-          {ALBERTA_REFERRAL_HUBS.map((hub) => (
-            <div className="ab-hub-card" key={hub.id}>
-              <h3>{hub.name}</h3>
-              <div className="ab-hub-meta">{hub.zone} · {hub.corridor} corridor</div>
-              <div className="ab-section-label">Specialties</div>
-              <div className="ab-hub-towns">
-                {hub.specialties.map((s) => <span className="ab-chip" key={s}>{s}</span>)}
-              </div>
-              <div className="ab-section-label">Towns routed here</div>
-              <div className="ab-hub-towns">{hub.towns.map(townChip)}</div>
-            </div>
-          ))}
+        <div className="db-ptable-card">
+          <div className="db-ptable-head">
+            <div className="mf-page-title" style={{ fontSize: 16, margin: 0 }}>Referral hub directory</div>
+            <p style={{ margin: "4px 0 0", fontSize: 13.5, color: "var(--ink-soft)" }}>
+              Every hub's AHS zone, specialty intake and the towns routed to it.
+            </p>
+          </div>
+          <div className="db-ptable-scroll">
+            <table className="db-ptable wrap">
+              <thead>
+                <tr>
+                  <th>Hub</th>
+                  <th>Zone</th>
+                  <th>Corridor</th>
+                  <th>Routing rule</th>
+                  <th>Specialties</th>
+                  <th>Towns routed here</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ALBERTA_REFERRAL_HUBS.map((hub) => (
+                  <tr key={hub.id}>
+                    <td><span className="db-ptable-strong">{hub.name}</span></td>
+                    <td>{hub.zone}</td>
+                    <td>{hub.corridor}</td>
+                    <td className="db-ptable-rule">{hub.rule}</td>
+                    <td>
+                      <div className="db-ptable-chip-list">
+                        {hub.specialties.map((s) => <span className="ab-chip" key={s}>{s}</span>)}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="db-ptable-chip-list">{hub.towns.map(townChip)}</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>

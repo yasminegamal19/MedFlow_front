@@ -52,9 +52,10 @@ function severe(conditionGroup) {
   return input;
 }
 
-function redFlag(conditionGroup, flagKey) {
+function redFlag(conditionGroup, label) {
   const input = emptyMskInput(conditionGroup);
-  input.redFlags[flagKey] = true;
+  input.redFlagActive = true;
+  input.redFlagLabels = [label];
   return input;
 }
 
@@ -73,7 +74,7 @@ const CONSIDER_ALTERNATIVE = "Consider alternative diagnosis";
 
 // One entry per numbered scenario in the spec. `build` returns the mskInput
 // fixture; `urgency`/`referral` are the two asserted outputs.
-function buildGroupScenarios(group, names, redFlagKeys, atypicalSuggestion) {
+function buildGroupScenarios(group, names, redFlagLabels, atypicalSuggestion) {
   const scenarios = [];
   // 1-6: Mild — Not appropriate yet
   for (let i = 0; i < 6; i++) {
@@ -89,7 +90,7 @@ function buildGroupScenarios(group, names, redFlagKeys, atypicalSuggestion) {
   }
   // 19-21: Red flags — Urgent / Urgent referral required
   for (let i = 18; i < 21; i++) {
-    scenarios.push({ name: names[i], group, urgency: URGENT, referral: URGENT_REFERRAL, build: () => redFlag(group, redFlagKeys[i - 18]) });
+    scenarios.push({ name: names[i], group, urgency: URGENT, referral: URGENT_REFERRAL, build: () => redFlag(group, redFlagLabels[i - 18]) });
   }
   // 22: True atypical — Routine / Consider alternative diagnosis
   scenarios.push({ name: names[21], group, urgency: ROUTINE, referral: CONSIDER_ALTERNATIVE, build: () => atypical(group, atypicalSuggestion) });
@@ -134,9 +135,9 @@ const LUMBAR_NAMES = [
 ];
 
 const SCENARIOS = [
-  ...buildGroupScenarios("knee", KNEE_NAMES, ["infection", "trauma", "systemic"], "rheumatology"),
-  ...buildGroupScenarios("shoulder", SHOULDER_NAMES, ["infection", "trauma", "neuroDeficit"], "neurology / cervical spine"),
-  ...buildGroupScenarios("lumbar", LUMBAR_NAMES, ["neuroDeficit", "infection", "trauma"], "neurology"),
+  ...buildGroupScenarios("knee", KNEE_NAMES, ["Suspected infection", "Trauma", "Rapid decline / malignancy"], "rheumatology"),
+  ...buildGroupScenarios("shoulder", SHOULDER_NAMES, ["Suspected infection", "Fracture", "Neurological deficit"], "neurology / cervical spine"),
+  ...buildGroupScenarios("lumbar", LUMBAR_NAMES, ["Cauda equina", "Suspected infection", "Trauma"], "neurology"),
 ];
 
 let failed = 0;

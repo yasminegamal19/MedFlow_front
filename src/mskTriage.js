@@ -19,6 +19,10 @@ export const CONDITION_GROUPS = [
   { id: "dupuytrens", label: "Dupuytren's Contracture" },
   { id: "acute_hand_injury", label: "Acute Hand / Wrist Injury" },
   { id: "skin_lesion", label: "Suspected Skin / Soft Tissue Lesion" },
+  { id: "elbow", label: "Elbow" },
+  { id: "foot_ankle", label: "Foot & Ankle" },
+  { id: "cervical_spine", label: "Neck Pain / Cervical Myelopathy" },
+  { id: "rheumatoid_hand", label: "Rheumatoid Hand" },
 ];
 
 // Weeks of conservative management expected before referral is "Appropriate"
@@ -39,6 +43,10 @@ const CONSERVATIVE_TRIAL_WEEKS = {
   dupuytrens: 6,
   acute_hand_injury: 0,
   skin_lesion: 0,
+  elbow: 26, // epicondylosis: at least 6 months nonoperative management
+  foot_ankle: 6,
+  cervical_spine: 12,
+  rheumatoid_hand: 0, // rheumatology-first, not a watch-and-wait pathway
 };
 
 export function emptyMskInput(conditionGroup = "cts") {
@@ -52,12 +60,12 @@ export function emptyMskInput(conditionGroup = "cts") {
       sleepDisruption: "", // none | occasional | present | major
       functionalImpact: "", // minimal | clear | major
     },
-    redFlags: {
-      infection: false,
-      trauma: false,
-      neuroDeficit: false,
-      systemic: false,
-    },
+    // Whether any red flag is active, and the human-readable label(s) that
+    // triggered it — sourced from whichever red-flag checklist the caller
+    // uses (generic 4-category list here, or a pathway's own red-flag
+    // groups when driven from the unified Clinical Assessment form).
+    redFlagActive: false,
+    redFlagLabels: [],
     exam: {
       rom: "", // normal | reduced | major_loss
       strengthDeficit: "", // none | mild | moderate | severe
@@ -75,13 +83,6 @@ export function emptyMskInput(conditionGroup = "cts") {
     atypical: { present: false, suggestion: "" },
   };
 }
-
-const RED_FLAG_LABELS = {
-  infection: "infection (fever, warmth, redness, severe pain)",
-  trauma: "trauma with suspected fracture/dislocation",
-  neuroDeficit: "major neurological deficit (foot drop, saddle anesthesia, cauda equina, sudden weakness)",
-  systemic: "systemic disease signs (RA, malignancy suspicion, unexplained weight loss)",
-};
 
 function classifySeverityShared(symptoms, exam) {
   const severe =
@@ -142,6 +143,10 @@ function investigationSuggestion(conditionGroup) {
     dupuytrens: null,
     acute_hand_injury: "X-ray of the injured region",
     skin_lesion: "biopsy or dermoscopic assessment",
+    elbow: "elbow X-ray (AP, lateral)",
+    foot_ankle: "weight-bearing foot and ankle X-ray",
+    cervical_spine: "upright cervical spine X-ray",
+    rheumatoid_hand: "CBC, CRP, RF, anti-CCP and hand X-ray",
   }[conditionGroup];
 }
 
@@ -153,19 +158,18 @@ function investigationSuggestion(conditionGroup) {
  *   referralAppropriateness: string, missingInfo: string[], nextSteps: string[]}}
  */
 export function runMskTriage(input) {
-  const { conditionGroup, redFlags, symptoms, exam, management, investigations, atypical } = input;
+  const { conditionGroup, redFlagActive, redFlagLabels, symptoms, exam, management, investigations, atypical } = input;
   const missingInfo = computeMissingInfo(input);
 
   // Step 3 — red flags short-circuit everything.
-  const activeRedFlags = Object.entries(redFlags).filter(([, on]) => on).map(([k]) => RED_FLAG_LABELS[k]);
-  if (activeRedFlags.length > 0) {
+  if (redFlagActive) {
     return {
       conditionGroup,
       severity: "Red Flag",
       urgency: "Urgent",
       referralAppropriateness: "Urgent referral required",
       missingInfo,
-      nextSteps: [`Urgent ED / same-day specialist referral — red flag(s): ${activeRedFlags.join("; ")}.`],
+      nextSteps: [`Urgent ED / same-day specialist referral — red flag(s): ${(redFlagLabels || []).join("; ") || "see red-flag screening"}.`],
     };
   }
 

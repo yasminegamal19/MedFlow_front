@@ -2,7 +2,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import MedFlowApp from "./MedFlowApp.jsx";
 import AlbertaRoutingPage from "./AlbertaRoutingPage.jsx";
-import DoctorProfilePage from "./DoctorProfilePage.jsx";
+import DashboardPage from "./DashboardPage.jsx";
 import LoginPage from "./LoginPage.jsx";
 import { setApiToken, logout as logoutApi } from "./api.js";
 import "./index.css";
@@ -59,9 +59,9 @@ function AuthGate() {
   if (requestedPage === "alberta-routing") {
     return <AlbertaRoutingPage user={auth.user} onLogout={handleLogout} onBack={backToWorkflow} />;
   }
-  if (requestedPage === "profile") {
+  if (requestedPage === "dashboard" || requestedPage === "profile") {
     return (
-      <DoctorProfilePage
+      <DashboardPage
         user={auth.user}
         onLogout={handleLogout}
         onBack={backToWorkflow}
@@ -71,7 +71,7 @@ function AuthGate() {
   }
   return (
     <MedFlowApp user={auth.user} onLogout={handleLogout}
-      onOpenProfile={() => { window.location.search = "?page=profile"; }} />
+      onOpenDashboard={() => { window.location.search = "?page=dashboard"; }} />
   );
 }
 

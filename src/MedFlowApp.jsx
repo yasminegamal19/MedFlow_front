@@ -1,20 +1,28 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   FileText, Sparkles, ShieldCheck, FileSignature, UserCheck, User, Send,
   Check, X, AlertTriangle, ChevronDown, UploadCloud, Menu, ArrowRight, ArrowLeft,
   Eye, EyeOff, Pencil, RefreshCw, Info, Paperclip, GitBranch, ScrollText, LogOut,
-  Settings, MapPin, ClipboardList, BookOpen,
+  LayoutDashboard, MapPin, ClipboardList, Route,
 } from "lucide-react";
 import { GlobalStyle } from "./styles.jsx";
 import { resolveReferralHub, ALL_ALBERTA_TOWNS, ALBERTA_REFERRAL_HUBS } from "./albertaReferralRouting.js";
-import { CONDITION_GROUPS, emptyMskInput, runMskTriage } from "./mskTriage.js";
-import { inferMskFieldsFromSections } from "./mskAutoFill.js";
-import { inferPathwayFieldsFromSections } from "./pathwayAutoFill.js";
-import { PATHWAY_FORMS } from "./pathwayForms.js";
+// Offline fallback for the Referral Routing step — used only if
+// GET /referral-routing/catalog can't be reached; the backend-seeded
+// catalog (ReferralRoutingSeeder) is otherwise the source of truth.
+import {
+  ZONES, PROGRAM_CONTACTS as STATIC_PROGRAM_CONTACTS, NON_URGENT_ADVICE_ZONES,
+  ENTRY_DOORS as STATIC_ENTRY_DOORS, CLINICAL_PATHWAYS as STATIC_CLINICAL_PATHWAYS,
+  EMERGENCY_INDICATIONS as STATIC_EMERGENCY_INDICATIONS, URGENT_INDICATIONS as STATIC_URGENT_INDICATIONS,
+  ALL_REASONS as STATIC_ALL_REASONS, REASON_GROUPS as STATIC_REASON_GROUPS,
+} from "./referralPathwayCatalog.js";
+import { CONDITION_GROUPS, runMskTriage } from "./mskTriage.js";
+import { inferClinicalFieldsFromSections } from "./clinicalAutoFill.js";
 import {
   getCurrentUser, listCaseTypes, listWorkflowTemplates, createPatient, createCase,
   submitExtraction, getExtraction, retryExtraction, isTerminal, evaluateRules,
-  submitPathwayValidation, analyzeAttachment,
+  submitPathwayValidation, analyzeAttachment, listPathways, getPathwayDefinition,
+  getReferralRoutingCatalog, getCaseReferralRouting, submitCaseReferralRouting,
 } from "./api.js";
 import {
   ORG, CASE_ID, GUIDING_PRINCIPLE, PATIENT_DEFAULTS, SAMPLE_NOTE,
@@ -34,8 +42,8 @@ const NAV = [
   { id: "patient", label: "Patient", icon: User, stage: "1 · Case creation" },
   { id: "intake", label: "Case intake", icon: FileText, stage: "1 · Case creation" },
   { id: "extraction", label: "AI extraction", icon: Sparkles, stage: "2 · AI ingestion & extraction" },
-  { id: "msk-triage", label: "MSK triage", icon: ClipboardList, stage: "3 · Clinical validation & rule check" },
-  { id: "pathway-reference", label: "Clinical pathway", icon: BookOpen, stage: "3 · Clinical validation & rule check" },
+  { id: "clinical-assessment", label: "Clinical assessment", icon: ClipboardList, stage: "3 · Clinical validation & rule check" },
+  { id: "referral-routing", label: "Referral routing", icon: Route, stage: "3 · Clinical validation & rule check" },
   { id: "validation", label: "Validation & rules", icon: ShieldCheck, stage: "3 · Clinical validation & rule check" },
   { id: "referral", label: "Referral draft", icon: FileSignature, stage: "4 · Draft generation" },
   { id: "review", label: "Physician review", icon: UserCheck, stage: "5 · Review & authorisation" },
@@ -43,20 +51,42 @@ const NAV = [
   { id: "feedback", label: "Feedback & audit", icon: GitBranch, stage: "7 · Tracking & learning" },
 ];
 
-// The case's referral pathway (set on Case intake, before the note exists —
-// just an initial guess) maps onto an MSK triage condition group where one
-// exists; "hip" has no dedicated overlay yet, so it's left for the physician
-// to pick manually. The reverse map feeds the *confirmed* condition group
-// (chosen post-extraction, against the real note) back into `pathway`, which
-// is what Validation & rules actually evaluates against — "cts" has no
-// intake-pathway/ai-service equivalent yet, so it's left unmapped.
-const CONDITION_GROUP_BY_PATHWAY = { knee: "knee", shoulder: "shoulder", spine: "lumbar" };
+// `pathway` is the ai-service-facing name used by Validation & rules
+// (app/services/pathways/{knee,shoulder,spine}.yaml — only these 3 packs
+// exist today); `clinicalCondition` is the Clinical Assessment condition
+// group (16 values, matches CONDITION_GROUPS). This map feeds the
+// confirmed/selected condition group into the ai-service name where one
+// exists; conditions with no YAML pack yet are left unmapped, and
+// Validation & rules falls back to its generic rules for them.
 const PATHWAY_BY_CONDITION_GROUP = { knee: "knee", shoulder: "shoulder", lumbar: "spine" };
+
+// DB pathway `code` (Pathway.code, e.g. "KNEE_OA") -> Clinical Assessment
+// condition group id (CONDITION_GROUPS key) — the two vocabularies differ,
+// so the intake picker (sourced from GET /pathways) translates through this
+// to drive the rest of the app unchanged.
+const PATHWAY_CODE_TO_CONDITION_GROUP = {
+  CTS: "cts",
+  SHOULDER: "shoulder",
+  KNEE_OA: "knee",
+  LOW_BACK_PAIN: "lumbar",
+  HIP_OA: "hip_oa",
+  MSK_ONCOLOGY: "msk_oncology",
+  HAND_WRIST_OA: "hand_wrist_oa",
+  HAND_WRIST_MASS: "hand_wrist_mass",
+  TRIGGER_FINGER: "trigger_finger",
+  DUPUYTRENS: "dupuytrens",
+  ACUTE_HAND_INJURY: "acute_hand_injury",
+  SKIN_LESION: "skin_lesion",
+  ELBOW: "elbow",
+  FOOT_ANKLE: "foot_ankle",
+  CERVICAL_SPINE: "cervical_spine",
+  RHEUMATOID_HAND: "rheumatoid_hand",
+};
 
 const STATUS_BY_PAGE = {
   patient: "Draft", intake: "Draft",
   extraction: "Extracting",
-  "msk-triage": "Triaging", "pathway-reference": "Triaging", validation: "Validating",
+  "clinical-assessment": "Triaging", "referral-routing": "Routing", validation: "Validating",
   referral: "Draft ready", review: "Pending review",
   send: "Pending review", feedback: "Completed",
 };
@@ -106,33 +136,14 @@ function computeStepOk({ patientOk, extraction, validationOk, decision, sendStat
     patient: patientOk,
     intake: Boolean(extraction),
     extraction: extractionOk,
-    "msk-triage": extractionOk,
-    "pathway-reference": extractionOk,
+    "clinical-assessment": extractionOk,
+    "referral-routing": extractionOk,
     validation: extractionOk,
     referral: Boolean(validationOk),
     review: Boolean(decision),
     send: sendState === "sent",
     feedback: sendState === "sent",
   };
-}
-
-// Applies a flat { "a.b": value } map onto a (deep-cloned) copy of `obj`,
-// only where the target leaf is still at its default/empty value — an AI
-// suggestion never overwrites something the physician (or a prior run) has
-// already set.
-function applyAiSuggestions(obj, fieldMap) {
-  const next = structuredClone(obj);
-  for (const [path, value] of Object.entries(fieldMap)) {
-    const keys = path.split(".");
-    let node = next;
-    for (let i = 0; i < keys.length - 1; i++) node = node[keys[i]];
-    const leaf = keys[keys.length - 1];
-    const current = node[leaf];
-    const isEmpty = current === "" || current === false || current === null || current === undefined;
-    if (isEmpty) node[leaf] = value;
-    else delete fieldMap[path]; // don't badge a field we didn't actually touch
-  }
-  return next;
 }
 
 function frontierOf(stepOk) {
@@ -154,7 +165,7 @@ function initialPage() {
   return NAV[Math.min(idx, INITIAL_FRONTIER)].id;
 }
 
-export default function MedFlowApp({ user, onLogout, onOpenProfile } = {}) {
+export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
   const [page, setPage] = useState(initialPage);
   const [visited, setVisited] = useState(() => visitedThrough(initialPage()));
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -167,18 +178,42 @@ export default function MedFlowApp({ user, onLogout, onOpenProfile } = {}) {
     mrn: `${PATIENT_DEFAULTS.mrn}-${Date.now().toString(36).toUpperCase()}`,
   }));
   const [pathway, setPathway] = useState("knee");
-  const [mskInput, setMskInput] = useState(() => emptyMskInput(CONDITION_GROUP_BY_PATHWAY[pathway] || "cts"));
-  // Dot-paths (e.g. "symptoms.painPattern") currently holding a value the AI
-  // suggestion engine filled in and the physician hasn't touched yet — drives
-  // the "AI suggested" badges in PageMskTriage. Cleared per-field the moment
-  // the physician edits that field (see PageMskTriage's `set`).
-  const [mskAiFilled, setMskAiFilled] = useState({});
-  // The condition group physicians confirm at MSK Triage (post-extraction,
-  // against the real note) overrides the pre-note intake guess.
+  // The condition group the physician confirms at Clinical Assessment
+  // (post-extraction, against the real note) — the assessment form itself
+  // owns every other field locally (remounted per condition group; see
+  // ClinicalAssessmentForm), so this is the only piece lifted up here. The
+  // intake pathway picker now sets this directly (see PageIntake below).
+  const [clinicalCondition, setClinicalCondition] = useState("knee");
+  // The condition group confirmed at Clinical Assessment (or picked at
+  // intake, before the note exists) overrides the ai-service-facing guess.
   useEffect(() => {
-    const mapped = PATHWAY_BY_CONDITION_GROUP[mskInput.conditionGroup];
+    const mapped = PATHWAY_BY_CONDITION_GROUP[clinicalCondition];
     if (mapped) setPathway(mapped);
-  }, [mskInput.conditionGroup]);
+  }, [clinicalCondition]);
+
+  // Pathways fetched from the database (GET /pathways) for the intake
+  // picker — falls back to the static CONDITION_GROUPS labels (no DB id) if
+  // this hasn't resolved yet or the backend is unreachable.
+  const [pathways, setPathways] = useState([]);
+  const [selectedPathwayId, setSelectedPathwayId] = useState(null);
+  useEffect(() => {
+    listPathways()
+      .then((list) => setPathways(list.map((p) => ({ ...p, conditionGroup: PATHWAY_CODE_TO_CONDITION_GROUP[p.code] }))))
+      .catch(() => {}); // keep the static fallback in PageIntake
+  }, []);
+  // Default the DB-backed selection to whatever condition group is already
+  // active (e.g. the "knee" default) once the list loads, so a physician
+  // who never touches the picker still gets a pathway_id on case creation.
+  useEffect(() => {
+    if (selectedPathwayId || pathways.length === 0) return;
+    const match = pathways.find((p) => p.conditionGroup === clinicalCondition);
+    if (match) setSelectedPathwayId(match.id);
+  }, [pathways, clinicalCondition, selectedPathwayId]);
+  // The selected pathway's DB field definition (sections -> fields ->
+  // options/AI-fill mapping) — fetched after case creation, held for a
+  // future AI-fill step; nothing consumes it yet.
+  const [pathwayDefinition, setPathwayDefinition] = useState(null);
+
   const [notes, setNotes] = useState("");
   const [files, setFiles] = useState([]);
   const [sections, setSections] = useState(() => JSON.parse(JSON.stringify(AI_REQUEST.result.sections)));
@@ -192,6 +227,17 @@ export default function MedFlowApp({ user, onLogout, onOpenProfile } = {}) {
   const [extraction, setExtraction] = useState(null); // real extraction record once a case is created
   const [intakeSubmitting, setIntakeSubmitting] = useState(false);
   const [intakeError, setIntakeError] = useState(null);
+
+  // The created case's id — set once intake succeeds, consumed by Referral
+  // Routing to GET/POST that case's referral-routing decision.
+  const [caseId, setCaseId] = useState(null);
+  // The referral-routing catalog fetched from the backend (GET
+  // /referral-routing/catalog); null falls back to the static
+  // referralPathwayCatalog.js import (see PageReferralRouting).
+  const [referralCatalog, setReferralCatalog] = useState(null);
+  useEffect(() => {
+    getReferralRoutingCatalog().then(setReferralCatalog).catch(() => {});
+  }, []);
 
   // AI-assisted description of an uploaded image attachment (e.g. an X-ray) —
   // never a diagnosis. Only the first image-type attachment is analyzed.
@@ -216,7 +262,7 @@ export default function MedFlowApp({ user, onLogout, onOpenProfile } = {}) {
   const genericSignals = deterministicSignals || RULE_SIGNALS;
 
   // Step 4 of the Alberta routing automation: once the doctor's clinic town
-  // resolves to a hub (set on the Profile settings page), route to that
+  // resolves to a hub (set on the Dashboard's Profile & routing tab), route to that
   // hub's real specialty clinics instead of the generic mock directory.
   // A referral can override the doctor's default town (e.g. the patient's
   // own town differs) without touching the saved profile setting.
@@ -313,12 +359,27 @@ export default function MedFlowApp({ user, onLogout, onOpenProfile } = {}) {
         created_by: user.id,
         case_type_id: caseType.id,
         workflow_template_id: template.id,
+        ...(selectedPathwayId ? { pathway_id: selectedPathwayId } : {}),
         status: "created",
         raw_notes: notes,
       }, files.map((f) => f.file));
+      setCaseId(newCase.id);
 
       const queued = await submitExtraction({ note: notes, pathway, caseId: newCase.id });
       setExtraction(queued);
+
+      // Fetch the selected pathway's field definition — the JSON meant to
+      // later tell an AI step which Clinical Assessment fields exist and
+      // how to fill them. Nothing consumes it yet; held for that next step.
+      if (selectedPathwayId) {
+        getPathwayDefinition(selectedPathwayId)
+          .then((def) => {
+            setPathwayDefinition(def);
+            const fieldCount = def.sections.reduce((n, s) => n + s.fields.length, 0);
+            console.log(`Pathway definition loaded: ${def.pathway.name} — ${def.sections.length} sections, ${fieldCount} fields`, def);
+          })
+          .catch(() => {});
+      }
 
       const imageAttachment = newCase.attachments?.find((a) => a.mime_type?.startsWith("image/"));
       if (imageAttachment) {
@@ -384,15 +445,15 @@ export default function MedFlowApp({ user, onLogout, onOpenProfile } = {}) {
 
   const handleExtractionCompleted = useCallback((secs) => {
     setSections(secs);
-    // Pre-fill MSK Triage from the extraction text — heuristic, frontend-only,
-    // never overwrites a field the physician (or a prior run) already set.
-    // Red flags are deliberately excluded; see mskAutoFill.js.
-    const suggestions = inferMskFieldsFromSections(secs);
-    setMskInput((prev) => applyAiSuggestions(prev, suggestions));
-    setMskAiFilled((prev) => ({ ...prev, ...suggestions }));
-    // AI pathway validation now runs once the physician leaves MSK Triage
-    // (see the "msk-triage" page below) — not here — so it evaluates
-    // against the condition confirmed post-extraction, not a pre-note guess.
+    // AI pre-fill for Clinical Assessment happens inside the assessment form
+    // itself (computed once per pathway on mount — see
+    // DynamicClinicalAssessmentForm / clinicalAutoFill.js), not here, since
+    // it depends on which pathway's backend field definition is active.
+    //
+    // AI pathway validation now runs once the physician leaves Clinical
+    // Assessment (see the "clinical-assessment" page below) — not here — so
+    // it evaluates against the condition confirmed post-extraction, not a
+    // pre-note guess.
   }, []);
 
   const statusLabel = sendState === "sent" ? "Sent" : (STATUS_BY_PAGE[page] || "Draft");
@@ -402,7 +463,7 @@ export default function MedFlowApp({ user, onLogout, onOpenProfile } = {}) {
       <GlobalStyle />
       <TopBar statusLabel={statusLabel} stepIndex={currentIndex} stepTotal={NAV.length}
         stage={NAV[currentIndex]?.stage} onMenuClick={() => setSidebarOpen((v) => !v)}
-        user={user} onLogout={onLogout} onOpenProfile={onOpenProfile} />
+        user={user} onLogout={onLogout} onOpenDashboard={onOpenDashboard} />
 
       <div className="mf-body">
         <Sidebar nav={NAV} page={page} visited={visited} maxReachableIndex={maxReachableIndex}
@@ -415,7 +476,9 @@ export default function MedFlowApp({ user, onLogout, onOpenProfile } = {}) {
                 onNext={() => { showToast("Patient info saved"); next(); }} />
             )}
             {page === "intake" && (
-              <PageIntake pathway={pathway} setPathway={setPathway} notes={notes} setNotes={setNotes}
+              <PageIntake pathways={pathways} clinicalCondition={clinicalCondition}
+                onChangePathway={(id, conditionGroup) => { setSelectedPathwayId(id); setClinicalCondition(conditionGroup); }}
+                notes={notes} setNotes={setNotes}
                 files={files} setFiles={setFiles}
                 onCreate={handleCreateCase} submitting={intakeSubmitting} error={intakeError}
                 onBack={back} />
@@ -426,15 +489,13 @@ export default function MedFlowApp({ user, onLogout, onOpenProfile } = {}) {
                 imagingJob={imagingJob} imagingSubmitError={imagingSubmitError}
                 onCompleted={handleExtractionCompleted} onNext={next} onBack={back} />
             )}
-            {page === "msk-triage" && (
-              <PageMskTriage sections={sections} input={mskInput} setInput={setMskInput}
-                aiFilled={mskAiFilled} setAiFilled={setMskAiFilled}
-                onNext={next} onBack={back} />
-            )}
-            {page === "pathway-reference" && (
-              <PageClinicalPathway conditionGroup={mskInput.conditionGroup} sections={sections}
-                onChangeConditionGroup={(id) => setMskInput((prev) => ({ ...prev, conditionGroup: id }))}
+            {page === "clinical-assessment" && (
+              <PageClinicalAssessment conditionGroup={clinicalCondition} pathways={pathways} sections={sections}
+                onChangeConditionGroup={setClinicalCondition}
                 onNext={() => { runValidation(sections); next(); }} onBack={back} />
+            )}
+            {page === "referral-routing" && (
+              <PageReferralRouting catalog={referralCatalog} caseId={caseId} onNext={next} onBack={back} />
             )}
             {page === "validation" && (
               <PageValidation signal={pathwaySignal} genericSignals={genericSignals}
@@ -476,7 +537,7 @@ export default function MedFlowApp({ user, onLogout, onOpenProfile } = {}) {
 
 /* ── Shell ──────────────────────────────────────────────────────────────── */
 
-function TopBar({ statusLabel, stepIndex, stepTotal, stage, onMenuClick, user, onLogout, onOpenProfile }) {
+function TopBar({ statusLabel, stepIndex, stepTotal, stage, onMenuClick, user, onLogout, onOpenDashboard }) {
   const pct = Math.round(((stepIndex + 1) / stepTotal) * 100);
   return (
     <div className="mf-topbar">
@@ -490,9 +551,9 @@ function TopBar({ statusLabel, stepIndex, stepTotal, stage, onMenuClick, user, o
           <span className="mf-step-count">Stage {stage?.[0]} <span className="mf-step-count-of">of 7</span></span>
           <span className={`mf-status-pill mf-status-${statusLabel.replace(/\s/g, "-").toLowerCase()}`}>{statusLabel}</span>
           <span className="mf-org-badge">{user?.name || ORG}</span>
-          {onOpenProfile && (
-            <button className="mf-mini-btn ghost" onClick={onOpenProfile} aria-label="Profile settings" title="Profile settings">
-              <Settings size={13} /> Profile
+          {onOpenDashboard && (
+            <button className="mf-mini-btn ghost" onClick={onOpenDashboard} aria-label="Dashboard" title="Dashboard">
+              <LayoutDashboard size={13} /> Dashboard
             </button>
           )}
           {onLogout && (
@@ -642,12 +703,23 @@ function PagePatient({ patient, setPatient, onNext }) {
 
 /* ── Stage 1b: Case intake ─────────────────────────────────────────────── */
 
-function PageIntake({ pathway, setPathway, notes, setNotes, files, setFiles, onCreate, submitting, error, onBack }) {
+function PageIntake({ pathways, clinicalCondition, onChangePathway, notes, setNotes, files, setFiles, onCreate, submitting, error, onBack }) {
   const [dragOver, setDragOver] = useState(false);
   const [touched, setTouched] = useState(false);
   const inputRef = useRef(null);
   const notesValid = notes.trim().length >= 10;
-  const canSubmit = notesValid && pathway && !submitting;
+  const canSubmit = notesValid && clinicalCondition && !submitting;
+
+  // Sourced from the database (GET /pathways) once loaded; falls back to
+  // the static condition-group list (no real pathway_id yet) so intake
+  // still works if the backend is unreachable.
+  const fromDb = pathways.length > 0;
+  const options = fromDb
+    ? pathways.map((p) => ({ value: p.id, label: p.name, conditionGroup: p.conditionGroup }))
+    : CONDITION_GROUPS.map((c) => ({ value: c.id, label: c.label, conditionGroup: c.id }));
+  const selectedValue = fromDb
+    ? (pathways.find((p) => p.conditionGroup === clinicalCondition)?.id || "")
+    : clinicalCondition;
 
   const addFiles = (list) => setFiles((prev) => [
     ...prev,
@@ -661,11 +733,11 @@ function PageIntake({ pathway, setPathway, notes, setNotes, files, setFiles, onC
         <div>
           <Field label="Referral pathway">
             <div className="mf-select-wrap">
-              <select className="mf-select" value={pathway} onChange={(e) => setPathway(e.target.value)}>
-                <option value="knee">Orthopaedics — Knee</option>
-                <option value="hip">Orthopaedics — Hip</option>
-                <option value="shoulder">Orthopaedics — Shoulder</option>
-                <option value="spine">Orthopaedics — Spine</option>
+              <select className="mf-select" value={selectedValue} onChange={(e) => {
+                const opt = options.find((o) => o.value === e.target.value);
+                if (opt) onChangePathway(fromDb ? opt.value : null, opt.conditionGroup);
+              }}>
+                {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
               <ChevronDown size={16} className="mf-select-icon" />
             </div>
@@ -708,7 +780,7 @@ function PageIntake({ pathway, setPathway, notes, setNotes, files, setFiles, onC
           </Field>
         </div>
         <SummaryCard title="Case summary">
-          <SummaryRow k="Pathway" v={`Orthopaedics — ${pathway[0].toUpperCase()}${pathway.slice(1)}`} />
+          <SummaryRow k="Pathway" v={options.find((o) => o.value === selectedValue)?.label || "—"} />
           <SummaryRow k="Notes" v={`${notes.trim() ? notes.trim().split(/\s+/).length : 0} words`} />
           <SummaryRow k="Attachments" v={files.length} />
           <SummaryRow k="Status" v={<StatusPillSmall color="amber">Draft</StatusPillSmall>} />
@@ -754,7 +826,7 @@ function PageExtraction({ extraction, setExtraction, sections, setSections, imag
   // { sections } shape the mock/demo fallback uses. Normalize both into the
   // same {title, content, source_phrase, verbatim} list — that normalized
   // list is exactly `sections` (lifted state), the single editable source of
-  // truth used here and everything downstream (MSK triage, Review).
+  // truth used here and everything downstream (Clinical Assessment, Review).
   const items = live ? r.result?.items : GROUNDED.items;
   const notStated = live ? r.result?.not_stated : GROUNDED.not_stated;
   // A terminal, non-failed request should always carry a result — but guard
@@ -984,16 +1056,17 @@ function PageExtraction({ extraction, setExtraction, sections, setSections, imag
           </div>
 
           <div className="mf-actions">
-            <button className="mf-primary-btn" onClick={onNext}>Continue to MSK triage <ArrowRight size={15} /></button>
+            <button className="mf-primary-btn" onClick={onNext}>Continue to clinical assessment <ArrowRight size={15} /></button>
           </div>
         </>
       )}
-      <PageNav onBack={onBack} onNext={pending || failed || missingResult ? undefined : onNext} nextLabel="Continue to MSK triage" />
+      <PageNav onBack={onBack} onNext={pending || failed || missingResult ? undefined : onNext} nextLabel="Continue to clinical assessment" />
     </PageShell>
   );
 }
 
-/* ── Stage 3a: MSK triage assistant (static, deterministic — no model) ──── */
+/* ── Stage 3: Clinical assessment — condition-specific pathway walkthrough
+   feeding a live, deterministic triage result (static logic, no model) ──── */
 
 // Small "AI suggested this — verify or change it" badge, shown next to a
 // field's current value only until the physician interacts with that field.
@@ -1039,231 +1112,6 @@ const MSK_RESULT_TONE = {
   Routine: "sage", Priority: "amber", Urgent: "clay",
 };
 
-function PageMskTriage({ sections, input, setInput, aiFilled, setAiFilled, onNext, onBack }) {
-  const [showLegend, setShowLegend] = useState(false);
-  const set = (path, value) => {
-    setInput((prev) => {
-      const next = structuredClone(prev);
-      let obj = next;
-      const keys = path.split(".");
-      for (let i = 0; i < keys.length - 1; i++) obj = obj[keys[i]];
-      obj[keys[keys.length - 1]] = value;
-      return next;
-    });
-    // The physician has now made this field their own decision, whatever the
-    // AI guessed — clear its "verify me" badge.
-    setAiFilled((prev) => {
-      if (!(path in prev)) return prev;
-      const next = { ...prev };
-      delete next[path];
-      return next;
-    });
-  };
-  const clearAiSuggestions = () => {
-    setInput((prev) => {
-      const next = structuredClone(prev);
-      for (const path of Object.keys(aiFilled)) {
-        const keys = path.split(".");
-        let obj = next;
-        for (let i = 0; i < keys.length - 1; i++) obj = obj[keys[i]];
-        const leaf = keys[keys.length - 1];
-        obj[leaf] = typeof obj[leaf] === "boolean" ? false : "";
-      }
-      return next;
-    });
-    setAiFilled({});
-  };
-  const aiCount = Object.keys(aiFilled).length;
-  const result = runMskTriage(input);
-
-  return (
-    <PageShell title="MSK triage assistant"
-      subhead="A deterministic rules engine — no model call, nothing sent anywhere. Fill in what the note and exam document; severity, urgency, and referral appropriateness update live.">
-      {sections?.length > 0 && (
-        <Accordion title="AI extraction (reference)" badge={`${sections.length} sections`} tone="sage">
-          <ul>{sections.map((s, i) => <li key={i}><b>{s.title}:</b> {s.content}</li>)}</ul>
-        </Accordion>
-      )}
-
-      {aiCount > 0 && (
-        <div className="mf-ai-banner">
-          <span><Sparkles size={13} style={{ verticalAlign: -2, marginRight: 6 }} />
-            {aiCount} field{aiCount === 1 ? "" : "s"} pre-filled from the AI extraction — review each before continuing.</span>
-          <button type="button" className="mf-mini-btn ghost" onClick={clearAiSuggestions}>Clear AI suggestions</button>
-        </div>
-      )}
-
-      <div className="mf-two-col">
-        <div>
-          <Field label="Condition group">
-            <div className="mf-channel-row">
-              {CONDITION_GROUPS.map((c) => (
-                <button type="button" key={c.id} className={`mf-channel-btn${input.conditionGroup === c.id ? " active" : ""}`}
-                  onClick={() => set("conditionGroup", c.id)}>
-                  {c.label}
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          <SectionLabel>Symptoms & duration</SectionLabel>
-          <Card>
-            <div className="mf-field-grid">
-              <PillGroup label="Duration" value={input.duration} onChange={(v) => set("duration", v)} aiValue={aiFilled["duration"]}
-                options={[{ value: "acute", label: "Acute (<6wk)" }, { value: "subacute", label: "Subacute (6–12wk)" }, { value: "chronic", label: "Chronic (>12wk)" }]} />
-              <PillGroup label="Pain pattern" value={input.symptoms.painPattern} onChange={(v) => set("symptoms.painPattern", v)} aiValue={aiFilled["symptoms.painPattern"]}
-                options={[{ value: "intermittent", label: "Intermittent" }, { value: "daily_frequent", label: "Daily / frequent" }, { value: "constant", label: "Constant" }]} />
-              <PillGroup label="Functional impact" value={input.symptoms.functionalImpact} onChange={(v) => set("symptoms.functionalImpact", v)} aiValue={aiFilled["symptoms.functionalImpact"]}
-                options={[{ value: "minimal", label: "Minimal" }, { value: "clear", label: "Clear (ADLs/work)" }, { value: "major", label: "Major" }]} />
-              <PillGroup label="Sleep disruption" value={input.symptoms.sleepDisruption} onChange={(v) => set("symptoms.sleepDisruption", v)} aiValue={aiFilled["symptoms.sleepDisruption"]}
-                options={[{ value: "none", label: "None" }, { value: "occasional", label: "Occasional" }, { value: "present", label: "Present" }, { value: "major", label: "Major" }]} />
-            </div>
-            <CheckField label="Numbness / tingling" checked={input.symptoms.numbnessTingling} onChange={(v) => set("symptoms.numbnessTingling", v)} ai={Boolean(aiFilled["symptoms.numbnessTingling"])} />
-            <CheckField label="Mechanical symptoms" hint="Locking, catching, giving way, clicking" checked={input.symptoms.mechanicalSymptoms} onChange={(v) => set("symptoms.mechanicalSymptoms", v)} ai={Boolean(aiFilled["symptoms.mechanicalSymptoms"])} />
-          </Card>
-
-          <SectionLabel>Red flags — any one short-circuits triage to Urgent</SectionLabel>
-          <Card style={{ background: "var(--clay-soft)", borderColor: "#E3B8B4" }}>
-            <div className="mf-info-strip" style={{ margin: "0 0 12px", background: "transparent", border: "1px dashed #E3B8B4", color: "var(--clay)" }}>
-              <Info size={13} style={{ flexShrink: 0, marginTop: 1 }} />
-              Never auto-filled from the AI extraction — a keyword match on a negated mention (e.g. "no history of trauma") is easy to get wrong. Check these only from your own reading of the note and exam.
-            </div>
-            <CheckField danger label="Infection" hint="Fever, warmth, redness, severe pain" checked={input.redFlags.infection} onChange={(v) => set("redFlags.infection", v)} />
-            <CheckField danger label="Trauma" hint="Suspected fracture/dislocation, deformity, inability to bear weight/use limb" checked={input.redFlags.trauma} onChange={(v) => set("redFlags.trauma", v)} />
-            <CheckField danger label="Major neurological deficit" hint="Foot drop, saddle anesthesia, cauda equina, sudden weakness" checked={input.redFlags.neuroDeficit} onChange={(v) => set("redFlags.neuroDeficit", v)} />
-            <CheckField danger label="Systemic disease signs" hint="RA, malignancy suspicion, unexplained weight loss" checked={input.redFlags.systemic} onChange={(v) => set("redFlags.systemic", v)} />
-          </Card>
-
-          <SectionLabel>Exam findings</SectionLabel>
-          <Card>
-            <div className="mf-field-grid">
-              <PillGroup label="Range of motion" value={input.exam.rom} onChange={(v) => set("exam.rom", v)} aiValue={aiFilled["exam.rom"]}
-                options={[{ value: "normal", label: "Normal" }, { value: "reduced", label: "Reduced" }, { value: "major_loss", label: "Major loss" }]} />
-              <PillGroup label="Strength deficit" value={input.exam.strengthDeficit} onChange={(v) => set("exam.strengthDeficit", v)} aiValue={aiFilled["exam.strengthDeficit"]}
-                options={[{ value: "none", label: "None" }, { value: "mild", label: "Mild" }, { value: "moderate", label: "Moderate" }, { value: "severe", label: "Severe" }]} />
-            </div>
-            <CheckField label="Deformity / atrophy" checked={input.exam.deformityAtrophy} onChange={(v) => set("exam.deformityAtrophy", v)} ai={Boolean(aiFilled["exam.deformityAtrophy"])} />
-            {input.conditionGroup === "cts" && (
-              <>
-                <CheckField label="Thenar atrophy" checked={input.exam.thenarAtrophy} onChange={(v) => set("exam.thenarAtrophy", v)} />
-                <CheckField label="Thumb weakness" checked={input.exam.thumbWeakness} onChange={(v) => set("exam.thumbWeakness", v)} />
-              </>
-            )}
-            {input.conditionGroup === "shoulder" && (
-              <CheckField label="Frozen shoulder" hint="Marked, global ROM loss" checked={input.exam.frozenShoulder} onChange={(v) => set("exam.frozenShoulder", v)} />
-            )}
-            {input.conditionGroup === "lumbar" && (
-              <CheckField label="Motor deficit" hint="e.g. foot drop" checked={input.exam.motorDeficit} onChange={(v) => set("exam.motorDeficit", v)} />
-            )}
-          </Card>
-
-          <SectionLabel>Investigations</SectionLabel>
-          <Card>
-            <div className="mf-field-grid">
-              <PillGroup label="Imaging" value={input.investigations.imaging} onChange={(v) => set("investigations.imaging", v)} aiValue={aiFilled["investigations.imaging"]}
-                options={[{ value: "done", label: "Done" }, { value: "pending", label: "Ordered / pending" }, { value: "not_done", label: "Not done" }]} />
-              <PillGroup label="Labs" value={input.investigations.labs} onChange={(v) => set("investigations.labs", v)} aiValue={aiFilled["investigations.labs"]}
-                options={[{ value: "done", label: "Done" }, { value: "pending", label: "Ordered / pending" }, { value: "not_done", label: "Not done" }]} />
-            </div>
-          </Card>
-
-          <SectionLabel>Management tried</SectionLabel>
-          <Card>
-            <div className="mf-field-grid">
-              <PillGroup label="Conservative management tried?" value={input.management.tried} onChange={(v) => set("management.tried", v)} aiValue={aiFilled["management.tried"]}
-                options={[{ value: "yes", label: "Yes" }, { value: "no", label: "No" }]} />
-              <Field label={<>Duration (weeks) {aiFilled["management.weeks"] !== undefined && <AiBadge />}</>}>
-                <input type="number" min="0" className="mf-input" style={{ width: 120 }}
-                  value={input.management.weeks} onChange={(e) => set("management.weeks", e.target.value)} />
-              </Field>
-              <PillGroup label="Response" value={input.management.response} onChange={(v) => set("management.response", v)} aiValue={aiFilled["management.response"]}
-                options={[{ value: "none", label: "None" }, { value: "partial", label: "Partial" }, { value: "good", label: "Good" }]} />
-            </div>
-          </Card>
-
-          <SectionLabel>Comorbidities & medications</SectionLabel>
-          <Card>
-            <div className="mf-field-grid">
-              <Field label={<>Comorbidities {aiFilled["comorbidities"] !== undefined && <AiBadge />}</>}>
-                <textarea className="mf-textarea" style={{ minHeight: 56 }} value={input.comorbidities} onChange={(e) => set("comorbidities", e.target.value)} />
-              </Field>
-              <Field label={<>Medications {aiFilled["medications"] !== undefined && <AiBadge />}</>}>
-                <textarea className="mf-textarea" style={{ minHeight: 56 }} value={input.medications} onChange={(e) => set("medications", e.target.value)} />
-              </Field>
-            </div>
-          </Card>
-
-          <SectionLabel>Atypical pattern</SectionLabel>
-          <Card>
-            <CheckField label="Pattern is atypical for this condition group"
-              hint="Overlaps with neuropathy, cervical radiculopathy, RA, hip OA, piriformis, etc."
-              checked={input.atypical.present} onChange={(v) => set("atypical.present", v)} />
-            {input.atypical.present && (
-              <Field label="Suggested alternative assessment">
-                <input type="text" className="mf-input" style={{ maxWidth: 320 }}
-                  placeholder="e.g. neurology, rheumatology, spine, hip"
-                  value={input.atypical.suggestion} onChange={(e) => set("atypical.suggestion", e.target.value)} />
-              </Field>
-            )}
-          </Card>
-        </div>
-
-        <SummaryCard title={
-          <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-            Triage result
-            <button type="button" className="mf-toggle-link" style={{ fontSize: 11, fontWeight: 500 }}
-              onClick={() => setShowLegend((v) => !v)}>
-              {showLegend ? "Hide legend" : "What do these mean?"}
-            </button>
-          </span>
-        }>
-          {showLegend && (
-            <div style={{ textAlign: "left", fontSize: 11.5, lineHeight: 1.6, color: "var(--ink-soft)", background: "var(--paper)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)", padding: "10px 12px", margin: "0 0 14px" }}>
-              <p style={{ fontWeight: 700, color: "var(--ink)", margin: "0 0 2px" }}>Urgency</p>
-              <p style={{ margin: "0 0 8px" }}>
-                <b>Routine</b> — mild/moderate, no red flags · <b>Priority</b> — severe, major functional impairment · <b>Urgent</b> — a red flag (infection, trauma, neuro deficit) is present.
-              </p>
-              <p style={{ fontWeight: 700, color: "var(--ink)", margin: "0 0 2px" }}>Missing information</p>
-              <p style={{ margin: "0 0 8px" }}>
-                What this checks for: symptom duration, severity, functional impact, red flags, physical exam, investigations, management attempted, comorbidities, medications. A flag means that item hasn't been filled in yet.
-              </p>
-              <p style={{ fontWeight: 700, color: "var(--ink)", margin: "0 0 2px" }}>Referral appropriateness</p>
-              <p style={{ margin: 0 }}>
-                <b>Appropriate</b> — meets pathway criteria · <b>Not appropriate yet</b> — conservative management not yet tried · <b>Urgent referral required</b> — a red flag · <b>Consider alternative diagnosis</b> — pattern is atypical.
-              </p>
-            </div>
-          )}
-          <SummaryRow k="Condition" v={CONDITION_GROUPS.find((c) => c.id === result.conditionGroup)?.label} />
-          <SummaryRow k="Severity" v={<StatusPillSmall color={MSK_RESULT_TONE[result.severity]}>{result.severity}</StatusPillSmall>} />
-          <SummaryRow k="Urgency" v={<StatusPillSmall color={MSK_RESULT_TONE[result.urgency]}>{result.urgency}</StatusPillSmall>} />
-          <SummaryRow k="Referral" v={result.referralAppropriateness} />
-          {result.missingInfo.length > 0 && (
-            <>
-              <p className="mf-summary-title" style={{ marginTop: 14 }}>Missing information</p>
-              <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11.5, lineHeight: 1.6, color: "var(--amber)", textAlign: "left" }}>
-                {result.missingInfo.map((m) => <li key={m}>{m}</li>)}
-              </ul>
-            </>
-          )}
-          <p className="mf-summary-title" style={{ marginTop: 14 }}>Suggested next steps</p>
-          <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11.5, lineHeight: 1.6, color: "var(--ink-soft)", textAlign: "left" }}>
-            {result.nextSteps.map((s, i) => <li key={i}>{s}</li>)}
-          </ul>
-        </SummaryCard>
-      </div>
-
-      <div className="mf-info-strip">
-        <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-        Deterministic decision support only — not a diagnosis. A physician must review every field and finding before proceeding.
-      </div>
-
-      <PageNav onBack={onBack} onNext={onNext} nextLabel="Continue to clinical pathway" />
-    </PageShell>
-  );
-}
-
-/* ── Stage 3b: Clinical pathway assessment (structured, progressive) ────── */
-
 function AlertBanner({ tone = "clay", title, children }) {
   return (
     <div className="mf-verdict mf-verdict-gap" style={tone === "clay" ? { background: "var(--clay-soft)", color: "var(--clay)" } : undefined}>
@@ -1276,14 +1124,28 @@ function AlertBanner({ tone = "clay", title, children }) {
   );
 }
 
-function PageClinicalPathway({ conditionGroup, onChangeConditionGroup, sections, onNext, onBack }) {
-  const form = PATHWAY_FORMS[conditionGroup];
+function PageClinicalAssessment({ conditionGroup, pathways, onChangeConditionGroup, sections, onNext, onBack }) {
+  const pathwayMeta = pathways.find((p) => p.conditionGroup === conditionGroup);
+
+  // The form itself comes from the backend (GET /pathways/{id}) rather than
+  // a hardcoded per-condition-group config — refetched whenever the tab
+  // (i.e. the DB pathway id behind it) changes.
+  const [definition, setDefinition] = useState(null);
+  const [defError, setDefError] = useState(null);
+  useEffect(() => {
+    setDefinition(null);
+    setDefError(null);
+    if (!pathwayMeta) return;
+    getPathwayDefinition(pathwayMeta.id)
+      .then(setDefinition)
+      .catch((err) => setDefError(err.message || "Could not load this pathway's clinical assessment form."));
+  }, [pathwayMeta?.id]);
 
   return (
-    <PageShell title="Clinical pathway assessment"
-      subhead={form
-        ? `${form.title} — a structured walk-through pre-filled from the AI extraction where the note already says so; every value stays editable. Each section unlocks the next; nothing here blocks moving on.`
-        : "A structured walk-through of the written primary-care pathway for the condition confirmed at MSK Triage."}>
+    <PageShell title="Clinical assessment"
+      subhead={definition
+        ? `${definition.pathway.name} — pre-filled from the AI extraction where the note already says so; every value stays editable. One pathway walkthrough feeds the deterministic triage result below — nothing is asked twice.`
+        : "A structured walk-through of the written primary-care pathway for the condition, feeding a deterministic triage result."}>
 
       <Field label="Pathway">
         <div className="mf-channel-row" style={{ flexWrap: "wrap" }}>
@@ -1291,15 +1153,13 @@ function PageClinicalPathway({ conditionGroup, onChangeConditionGroup, sections,
             <button type="button" key={c.id} className={`mf-channel-btn${conditionGroup === c.id ? " active" : ""}`}
               onClick={() => onChangeConditionGroup?.(c.id)} style={{ flex: "1 1 150px" }}>
               {c.label}
-              {!PATHWAY_FORMS[c.id] && <span style={{ opacity: 0.6 }}> (soon)</span>}
+              {!pathways.some((p) => p.conditionGroup === c.id) && <span style={{ opacity: 0.6 }}> (soon)</span>}
             </button>
           ))}
         </div>
       </Field>
 
-      {form ? (
-        <ClinicalPathwayForm key={conditionGroup} conditionGroup={conditionGroup} sections={sections} onNext={onNext} onBack={onBack} />
-      ) : (
+      {!pathwayMeta ? (
         <>
           <div className="mf-info-strip">
             <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
@@ -1308,258 +1168,874 @@ function PageClinicalPathway({ conditionGroup, onChangeConditionGroup, sections,
           </div>
           <PageNav onBack={onBack} onNext={onNext} nextLabel="Continue to validation & rules" />
         </>
+      ) : defError ? (
+        <>
+          <div className="mf-info-strip">
+            <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+            {defError}
+          </div>
+          <PageNav onBack={onBack} onNext={onNext} nextLabel="Continue to validation & rules" />
+        </>
+      ) : !definition ? (
+        <p className="mf-tiny-note">Loading clinical assessment form…</p>
+      ) : (
+        <DynamicClinicalAssessmentForm key={definition.pathway.id} conditionGroup={conditionGroup}
+          definition={definition} sections={sections} onNext={onNext} onBack={onBack} />
       )}
     </PageShell>
   );
 }
 
-function ClinicalPathwayForm({ conditionGroup, sections, onNext, onBack }) {
-  const form = PATHWAY_FORMS[conditionGroup];
+/* ── Stage 3b: Referral routing (full Alberta pathway catalog) ─────────── */
 
-  // Computed once per mount — this component is remounted (via `key`) every
-  // time the pathway tab changes, so there's no stale-suggestion risk.
-  const [aiFilled, setAiFilled] = useState(() => inferPathwayFieldsFromSections(form, sections));
-  const aiVal = (kind, sub) => aiFilled[sub !== undefined ? `${kind}::${sub}` : kind];
-  const clearAiFlag = (kind, sub) => {
-    const key = sub !== undefined ? `${kind}::${sub}` : kind;
-    setAiFilled((prev) => {
-      if (!(key in prev)) return prev;
-      const next = { ...prev };
-      delete next[key];
-      return next;
-    });
+// A destination string's tone for the summary pill — a light heuristic
+// over the catalog's free-text destinations, not a separate data field.
+function destinationTone(text) {
+  if (!text) return "amber";
+  if (/neurosurg|oncology|—$/i.test(text)) return "clay";
+  if (/zone fast team/i.test(text) && !/hand → plastic|wrist →/i.test(text)) return "sage";
+  return "amber";
+}
+
+// Reshapes the backend catalog (GET /referral-routing/catalog) into the
+// exact field names the rest of this component uses — the same shape as
+// the static referralPathwayCatalog.js fallback, so the JSX below never
+// needs to know which source it came from.
+function normalizeReferralCatalog(raw) {
+  if (!raw) {
+    return {
+      entryDoors: STATIC_ENTRY_DOORS,
+      programContacts: STATIC_PROGRAM_CONTACTS,
+      nonUrgentAdviceZones: NON_URGENT_ADVICE_ZONES,
+      clinicalPathways: STATIC_CLINICAL_PATHWAYS,
+      emergencyIndications: STATIC_EMERGENCY_INDICATIONS,
+      urgentIndications: STATIC_URGENT_INDICATIONS,
+      reasons: STATIC_ALL_REASONS,
+      reasonGroups: STATIC_REASON_GROUPS,
+    };
+  }
+  const programContacts = {};
+  const nonUrgentAdviceZones = [];
+  for (const [zone, c] of Object.entries(raw.program_contacts || {})) {
+    programContacts[zone] = { raapid: c.raapid, fast: c.fast, nonUrgentAdvice: c.non_urgent_advice };
+    if (c.non_urgent_advice) nonUrgentAdviceZones.push(zone);
+  }
+  const emergencyIndications = {};
+  const urgentIndications = {};
+  for (const pathway of ["ortho", "plastic"]) {
+    const e = raw.urgent_indications?.[pathway]?.emergency;
+    const u = raw.urgent_indications?.[pathway]?.urgent;
+    if (e) emergencyIndications[pathway] = { examples: e.examples, action: e.action_text };
+    if (u) urgentIndications[pathway] = { examples: u.examples, zoneRouting: u.zone_routing };
+  }
+  return {
+    entryDoors: (raw.entry_doors || []).map((d) => ({ id: d.code, label: d.label, sub: d.description })),
+    programContacts,
+    nonUrgentAdviceZones,
+    clinicalPathways: raw.clinical_pathways || [],
+    emergencyIndications,
+    urgentIndications,
+    reasons: (raw.reasons || []).map((r) => ({
+      id: r.id,
+      pathway: r.pathway,
+      group: r.group_name,
+      label: r.label,
+      process: r.zone_process,
+      wcb: Boolean(r.wcb_required),
+      bypass: Boolean(r.is_bypass),
+      urgent: Boolean(r.is_urgent),
+      weeks: r.acute_weeks,
+      fundingNote: r.funding_note,
+      sourceConflict: r.source_conflict_note,
+      notes: r.notes,
+      imaging: r.imaging_items ? { timeframe: r.imaging_timeframe, items: r.imaging_items, notes: r.imaging_notes } : null,
+    })),
+    reasonGroups: raw.reason_groups || [],
   };
-  const clearAllAiSuggestions = () => {
-    setSelectValues({});
-    setRadioValue("");
-    setSymptomsChecked({});
-    setComorbidities("");
-    setImagingChoice(null);
-    setManagementChecked({});
-    setAiFilled({});
+}
+
+function ReasonSelect({ value, onChange, groups, reasons }) {
+  return (
+    <div className="mf-select-wrap">
+      <select className="mf-select" value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="" disabled>Select a reason for referral…</option>
+        {groups.map((g) => (
+          <optgroup key={g} label={g}>
+            {reasons.filter((r) => r.group === g).map((r) => (
+              <option key={r.id} value={r.id}>{r.label}</option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
+      <ChevronDown size={16} className="mf-select-icon" />
+    </div>
+  );
+}
+
+function PageReferralRouting({ catalog, caseId, onNext, onBack }) {
+  const data = useMemo(() => normalizeReferralCatalog(catalog), [catalog]);
+
+  const [door, setDoor] = useState(""); // entry door id
+  const [urgentPathway, setUrgentPathway] = useState(""); // "ortho" | "plastic" — for emergency/urgent doors
+  const [urgentZone, setUrgentZone] = useState("");
+  const [reasonId, setReasonId] = useState("");
+  const [zone, setZone] = useState("");
+  const [wcbStatus, setWcbStatus] = useState(null); // "yes" | "no" | null
+
+  // Prefill from this case's previously saved decision, if any — GET
+  // /cases/{id}/referral-routing. Only runs once the real catalog (with
+  // real reason UUIDs) has loaded, and only if nothing's been picked yet.
+  useEffect(() => {
+    if (!caseId || !catalog || door) return;
+    getCaseReferralRouting(caseId).then((saved) => {
+      if (!saved) return;
+      setDoor(saved.door_code || "");
+      if (saved.urgent_pathway) setUrgentPathway(saved.urgent_pathway);
+      if (saved.door_code === "urgent") setUrgentZone(saved.zone || "");
+      else setZone(saved.zone || "");
+      if (saved.reason_id) setReasonId(saved.reason_id);
+      if (saved.wcb_status) setWcbStatus(saved.wcb_status);
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caseId, catalog]);
+
+  const reason = data.reasons.find((r) => r.id === reasonId) || null;
+  const destination = reason && !reason.bypass && !reason.urgent && zone ? reason.process[zone] : null;
+  const isEdmonton = zone === "Edmonton";
+  const needsWcb = Boolean(reason && reason.wcb && zone);
+
+  const pickReason = (id) => { setReasonId(id); setZone(""); setWcbStatus(null); };
+  const pickZone = (z) => { setZone(z); setWcbStatus(null); };
+
+  const referralDone = Boolean(reason) && (
+    reason.bypass
+      ? true
+      : reason.urgent
+        ? Boolean(zone)
+        : Boolean(zone && destination && (!reason.wcb || wcbStatus))
+  );
+  const canContinue = door === "emergency" ? Boolean(urgentPathway)
+    : door === "urgent" ? Boolean(urgentPathway && urgentZone)
+    : door === "clinical_pathway" ? true
+    : door === "non_urgent_advice" ? true
+    : door === "non_urgent_referral" ? referralDone
+    : false;
+
+  // The "action" behind Continue — persists the decision to
+  // POST /cases/{id}/referral-routing. Best-effort: a failed save (offline,
+  // or a static-fallback reason id that isn't a real UUID) never blocks
+  // moving on, the same way runValidation() doesn't block Clinical
+  // Assessment's Next button.
+  const handleContinue = () => {
+    if (caseId) {
+      submitCaseReferralRouting(caseId, {
+        door_code: door,
+        urgent_pathway: (door === "emergency" || door === "urgent") ? (urgentPathway || null) : null,
+        reason_id: door === "non_urgent_referral" && reason && !reason.bypass && !reason.urgent ? reason.id : null,
+        zone: door === "urgent" ? (urgentZone || null) : (door === "non_urgent_referral" ? (zone || null) : null),
+        wcb_status: wcbStatus,
+        destination: destination || null,
+      }).catch(() => {});
+    }
+    onNext();
   };
-
-  const [eligible, setEligible] = useState(true);
-  const [historyDone, setHistoryDone] = useState(false);
-  const [selectValues, setSelectValues] = useState(() => {
-    const out = {};
-    for (const [k, v] of Object.entries(aiFilled)) if (k.startsWith("selectValues::")) out[k.slice(14)] = v;
-    return out;
-  });
-  const [radioValue, setRadioValue] = useState(() => aiFilled["radioValue"] || "");
-  const [symptomsChecked, setSymptomsChecked] = useState(() => {
-    const out = {};
-    for (const k of Object.keys(aiFilled)) if (k.startsWith("symptomsChecked::")) out[k.slice(17)] = true;
-    return out;
-  });
-  const [comorbidities, setComorbidities] = useState(() => aiFilled["comorbidities"] || "");
-
-  const [redFlagsDone, setRedFlagsDone] = useState(false);
-  const [redFlagChecked, setRedFlagChecked] = useState({});
-
-  const [anatomicalKey, setAnatomicalKey] = useState(null);
-  const [imagingChoice, setImagingChoice] = useState(() => aiFilled["imagingChoice"] || null);
-  const [managementChecked, setManagementChecked] = useState(() => {
-    const out = {};
-    for (const k of Object.keys(aiFilled)) if (k.startsWith("managementChecked::")) out[k.slice(19)] = true;
-    return out;
-  });
-  const [injectionChecked, setInjectionChecked] = useState({});
-
-  const aiCount = Object.keys(aiFilled).length;
-  const redFlagSymptomChecked = form.history.redFlagSymptom && symptomsChecked[form.history.redFlagSymptom];
-  const triggeredGroups = form.redFlagGroups.filter((g, gi) => g.items.some((_, i) => redFlagChecked[`${gi}::${i}`]));
-  const anatomicalSelection = form.anatomical?.options.find((o) => o.key === anatomicalKey);
-  const imagingRevealed = form.anatomical ? Boolean(anatomicalSelection) : redFlagsDone;
 
   return (
-    <>
-      {aiCount > 0 && (
-        <div className="mf-ai-banner">
-          <span><Sparkles size={13} style={{ verticalAlign: -2, marginRight: 6 }} />
-            {aiCount} field{aiCount === 1 ? "" : "s"} pre-filled from the AI extraction — review each before continuing.</span>
-          <button type="button" className="mf-mini-btn ghost" onClick={clearAllAiSuggestions}>Clear AI suggestions</button>
-        </div>
-      )}
-
-      <SectionLabel>1. Initial eligibility</SectionLabel>
-      <Card>
-        <CheckField label={form.eligibility.label} checked={eligible} onChange={setEligible} />
-        {!eligible && (
-          <div className="mf-info-strip" style={{ marginTop: 10 }}>
-            <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-            {form.eligibility.warning}
-          </div>
-        )}
-      </Card>
-
-      {eligible && (
-        <>
-          <SectionLabel>2. History & details</SectionLabel>
-          <Card>
-            <div className="mf-field-grid">
-              {form.history.selects.map((s) => (
-                <PillGroup key={s.key} label={s.label} value={selectValues[s.key]} aiValue={aiVal("selectValues", s.key)}
-                  onChange={(v) => { setSelectValues((prev) => ({ ...prev, [s.key]: v })); clearAiFlag("selectValues", s.key); }}
-                  options={s.options.map((o) => ({ value: o, label: o }))} />
+    <PageShell title="Referral routing"
+      subhead="Every entry door and reason-for-referral row from Alberta's provincial Orthopedic & Spine and Plastic Surgery pathway PDFs — pick the door, then (for a non-urgent referral) the specific reason; the reason alone determines the zone routing, imaging and WCB requirement. Nothing here is a clinical decision.">
+      <div className="mf-two-col">
+        <div>
+          <Field label="Entry door">
+            <div className="mf-choice-row" style={{ flexWrap: "wrap" }}>
+              {data.entryDoors.map((d) => (
+                <button key={d.id} type="button" className={`mf-choice${door === d.id ? " active" : ""}`}
+                  style={{ flex: "1 1 200px" }}
+                  onClick={() => { setDoor(d.id); setUrgentPathway(""); setUrgentZone(""); setReasonId(""); setZone(""); setWcbStatus(null); }}>
+                  <div className="mf-choice-title">{d.label}</div>
+                  <div className="mf-choice-sub">{d.sub}</div>
+                </button>
               ))}
-              {form.history.radio && (
-                <PillGroup label={form.history.radio.label} value={radioValue} aiValue={aiVal("radioValue")}
-                  onChange={(v) => { setRadioValue(v); clearAiFlag("radioValue"); }}
-                  options={form.history.radio.options.map((o) => ({ value: o, label: o }))} />
-              )}
             </div>
-            <Field label="Symptoms — check all that apply">
-              {form.history.symptoms.map((s) => (
-                <CheckField key={s} label={s} danger={s === form.history.redFlagSymptom}
-                  hint={s === form.history.redFlagSymptom ? "Alone warrants red-flag screening below" : undefined}
-                  checked={Boolean(symptomsChecked[s])} ai={Boolean(aiVal("symptomsChecked", s))}
-                  onChange={(v) => { setSymptomsChecked((prev) => ({ ...prev, [s]: v })); clearAiFlag("symptomsChecked", s); }} />
-              ))}
-            </Field>
-            <Field label={<>Comorbidities {aiVal("comorbidities") !== undefined && <AiBadge />}</>}>
-              <input type="text" className="mf-input" style={{ width: "100%", maxWidth: 420, boxSizing: "border-box" }}
-                placeholder={form.history.comorbiditiesPlaceholder} value={comorbidities}
-                onChange={(e) => { setComorbidities(e.target.value); clearAiFlag("comorbidities"); }} />
-            </Field>
-            {!historyDone && (
-              <button className="mf-primary-btn" onClick={() => setHistoryDone(true)} style={{ marginTop: 4 }}>
-                Continue to red-flag screening <ArrowRight size={15} />
-              </button>
-            )}
-          </Card>
-        </>
-      )}
+          </Field>
 
-      {historyDone && (
-        <>
-          <SectionLabel>3. Red-flag screening</SectionLabel>
-          <Card style={{ borderColor: "#E3B8B4" }}>
-            <p style={{ fontSize: 12.5, color: "var(--ink-soft)", margin: "0 0 12px" }}>
-              Check any that apply based on history and exam. Any selection triggers that category's pathway.
-            </p>
-            <div className="mf-info-strip" style={{ margin: "0 0 12px", background: "transparent", border: "1px dashed #E3B8B4", color: "var(--clay)" }}>
-              <Info size={13} style={{ flexShrink: 0, marginTop: 1 }} />
-              Never auto-filled from the AI extraction — check these only from your own reading of the note and exam.
-            </div>
-            {redFlagSymptomChecked && (
-              <AlertBanner title={`${form.history.redFlagSymptom} reported in history`}>
-                This symptom alone is a red flag — screen carefully below.
-              </AlertBanner>
-            )}
-            <div className="mf-field-grid">
-              {form.redFlagGroups.map((group, gi) => (
-                <div key={group.label} style={{ background: "var(--paper)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)", padding: "10px 12px" }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6, color: "var(--ink)" }}>{group.label}</div>
-                  {group.items.map((item, i) => (
-                    <CheckField key={i} label={item} danger checked={Boolean(redFlagChecked[`${gi}::${i}`])}
-                      onChange={(v) => setRedFlagChecked((prev) => ({ ...prev, [`${gi}::${i}`]: v }))} />
+          {(door === "emergency" || door === "urgent") && (
+            <>
+              <Field label="Pathway">
+                <div className="mf-channel-row">
+                  {["ortho", "plastic"].map((p) => (
+                    <button key={p} type="button" className={`mf-channel-btn${urgentPathway === p ? " active" : ""}`}
+                      onClick={() => { setUrgentPathway(p); setUrgentZone(""); }}>
+                      {p === "ortho" ? "Orthopedic & Spine" : "Plastic Surgery"}
+                    </button>
                   ))}
                 </div>
-              ))}
-            </div>
-            {triggeredGroups.map((g) => (
-              <AlertBanner key={g.label} tone={g.tone || "clay"} title={`${g.label} — action required`}>
-                {g.action}
-              </AlertBanner>
-            ))}
-            {!redFlagsDone && (
-              <button className="mf-primary-btn" onClick={() => setRedFlagsDone(true)} style={{ marginTop: 12 }}>
-                {triggeredGroups.length > 0 ? "Acknowledged — continue anyway" : "No red flags — continue"} <ArrowRight size={15} />
-              </button>
-            )}
-          </Card>
-        </>
-      )}
+              </Field>
 
-      {redFlagsDone && form.anatomical && (
-        <>
-          <SectionLabel>4. {form.anatomical.label}</SectionLabel>
-          <Card>
-            <div className="mf-channel-row" style={{ flexWrap: "wrap" }}>
-              {form.anatomical.options.map((o) => (
-                <button type="button" key={o.key} className={`mf-channel-btn${anatomicalKey === o.key ? " active" : ""}`}
-                  onClick={() => setAnatomicalKey(o.key)} style={{ flex: "1 1 140px" }}>
-                  {o.label}
-                </button>
-              ))}
-            </div>
-            {anatomicalSelection && (
-              <div style={{ marginTop: 14 }}>
-                <p className="mf-section-title">Differential diagnoses — {anatomicalSelection.label}</p>
-                <ul style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 13, lineHeight: 1.7 }}>
-                  {anatomicalSelection.differentials.map((d) => <li key={d}>{d}</li>)}
-                </ul>
-                {anatomicalSelection.warning && (
-                  <div className="mf-info-strip" style={{ marginTop: 10 }}>
-                    <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-                    {anatomicalSelection.warning}
+              {door === "emergency" && urgentPathway && (
+                <div className="mf-verdict mf-verdict-gap">
+                  <AlertTriangle size={16} />
+                  <div>
+                    <div>{data.emergencyIndications[urgentPathway].action}</div>
+                    <ul style={{ margin: "8px 0 0", paddingLeft: 16, fontSize: 12.5, lineHeight: 1.7 }}>
+                      {data.emergencyIndications[urgentPathway].examples.map((ex) => <li key={ex}>{ex}</li>)}
+                    </ul>
                   </div>
-                )}
-              </div>
-            )}
-          </Card>
-        </>
-      )}
+                </div>
+              )}
 
-      {imagingRevealed && (
-        <>
-          <SectionLabel>{form.anatomical ? "5" : "4"}. Imaging & management plan</SectionLabel>
-          <Card>
-            <p className="mf-section-title">Diagnostic imaging</p>
-            <div className="mf-channel-row" style={{ flexWrap: "wrap", marginBottom: 10 }}>
-              {form.imaging.options.map((o) => (
-                <button type="button" key={o.label} className={`mf-channel-btn${imagingChoice === o.label ? " active" : ""}`}
-                  onClick={() => { setImagingChoice(o.label); clearAiFlag("imagingChoice"); }} style={{ flex: "1 1 160px" }} title={o.detail}>
-                  {o.label}
-                  {aiVal("imagingChoice") === o.label && <AiBadge />}
-                </button>
-              ))}
-            </div>
-            <div className="mf-info-strip" style={{ marginBottom: 16 }}>
-              <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-              {form.imaging.note}
-            </div>
-
-            <p className="mf-section-title">Conservative / non-operative plan</p>
-            <div className="mf-field-grid">
-              {form.management.items.map((item) => (
-                <CheckField key={item} label={item} checked={Boolean(managementChecked[item])} ai={Boolean(aiVal("managementChecked", item))}
-                  onChange={(v) => { setManagementChecked((prev) => ({ ...prev, [item]: v })); clearAiFlag("managementChecked", item); }} />
-              ))}
-            </div>
-
-            <p className="mf-section-title" style={{ marginTop: 14 }}>Injection considerations</p>
-            {form.management.injections.map((inj) => (
-              <div key={inj.label}>
-                <CheckField label={inj.label} checked={Boolean(injectionChecked[inj.label])}
-                  onChange={(v) => setInjectionChecked((prev) => ({ ...prev, [inj.label]: v }))} />
-                {inj.warning && injectionChecked[inj.label] && (
-                  <div className="mf-verdict mf-verdict-gap" style={{ background: "var(--clay-soft)", color: "var(--clay)", marginTop: 4, marginBottom: 8 }}>
-                    <AlertTriangle size={14} /> {inj.warning}
+              {door === "urgent" && urgentPathway && (
+                <>
+                  <div className="mf-info-strip" style={{ flexDirection: "column", alignItems: "stretch" }}>
+                    <span>Indications ({urgentPathway === "ortho" ? "within 4 weeks" : "within 2 weeks"} of injury):</span>
+                    <ul style={{ margin: "6px 0 0", paddingLeft: 16, fontSize: 12.5, lineHeight: 1.7 }}>
+                      {data.urgentIndications[urgentPathway].examples.map((ex) => <li key={ex}>{ex}</li>)}
+                    </ul>
                   </div>
-                )}
+                  <Field label="Zone">
+                    <div className="mf-channel-row" style={{ flexWrap: "wrap" }}>
+                      {ZONES.map((z) => (
+                        <button key={z} type="button" className={`mf-channel-btn${urgentZone === z ? " active" : ""}`}
+                          style={{ flex: "1 1 100px" }} onClick={() => setUrgentZone(z)}>
+                          {z}
+                        </button>
+                      ))}
+                    </div>
+                  </Field>
+                  {urgentZone && (
+                    <div className="mf-verdict mf-verdict-gap">
+                      <Info size={16} />
+                      <span>{data.urgentIndications[urgentPathway].zoneRouting[urgentZone]}</span>
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+
+          {door === "clinical_pathway" && (
+            <Card>
+              <p className="mf-tiny-note" style={{ marginBottom: 8 }}>
+                A written clinical pathway may exist for this condition — review it for care-option guidance before deciding whether to refer.
+              </p>
+              <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, lineHeight: 1.8 }}>
+                {data.clinicalPathways.map((p) => <li key={p}>{p}</li>)}
+              </ul>
+            </Card>
+          )}
+
+          {door === "non_urgent_advice" && (
+            <div className="mf-verdict mf-verdict-gap">
+              <Info size={16} />
+              <div>
+                <div>eConsult via Alberta Netcare (all zones, response within 5 calendar days) — for hand/wrist advice specifically, provided by orthopedic surgeons.</div>
+                <div style={{ marginTop: 6 }}>
+                  ConnectMD phone advice — <b>{data.nonUrgentAdviceZones.join(" & ")} Zones only</b>: {data.programContacts.Edmonton?.nonUrgentAdvice}.
+                </div>
               </div>
-            ))}
-
-            <div className="mf-info-strip" style={{ marginTop: 16 }}>
-              <ScrollText size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-              {form.followUp}
             </div>
+          )}
 
-            <button className="mf-ghost-btn" onClick={() => window.print()} style={{ marginTop: 12 }}>
-              Print summary
-            </button>
-          </Card>
+          {door === "non_urgent_referral" && (
+            <>
+              <Field label="Reason for referral">
+                <ReasonSelect value={reasonId} onChange={pickReason} groups={data.reasonGroups} reasons={data.reasons} />
+              </Field>
+
+              {reason?.bypass && (
+                <div className="mf-verdict mf-verdict-gap">
+                  <Info size={16} />
+                  <span>{reason.fundingNote}</span>
+                </div>
+              )}
+
+              {reason?.urgent && (
+                <>
+                  <div className="mf-verdict mf-verdict-gap">
+                    <AlertTriangle size={16} />
+                    <span>Acute injury — {reason.weeks}-week window. {reason.notes?.join(" ")}</span>
+                  </div>
+                  <Field label="Zone">
+                    <div className="mf-channel-row" style={{ flexWrap: "wrap" }}>
+                      {ZONES.map((z) => (
+                        <button key={z} type="button" className={`mf-channel-btn${zone === z ? " active" : ""}`}
+                          style={{ flex: "1 1 100px" }} onClick={() => pickZone(z)}>
+                          {z}
+                        </button>
+                      ))}
+                    </div>
+                  </Field>
+                  {zone && (
+                    <div className="mf-info-strip">
+                      <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                      <span>{data.programContacts[zone]?.raapid}</span>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {reason && !reason.bypass && !reason.urgent && (
+                <>
+                  <Field label="Zone">
+                    <div className="mf-channel-row" style={{ flexWrap: "wrap" }}>
+                      {ZONES.map((z) => (
+                        <button key={z} type="button" className={`mf-channel-btn${zone === z ? " active" : ""}`}
+                          style={{ flex: "1 1 100px" }} onClick={() => pickZone(z)}>
+                          {z}
+                        </button>
+                      ))}
+                    </div>
+                  </Field>
+
+                  {reason.sourceConflict && (
+                    <div className="mf-verdict mf-verdict-gap">
+                      <AlertTriangle size={16} />
+                      <span>{reason.sourceConflict}</span>
+                    </div>
+                  )}
+
+                  {reason.fundingNote && (
+                    <div className="mf-info-strip">
+                      <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                      <span>{reason.fundingNote}</span>
+                    </div>
+                  )}
+
+                  {needsWcb && (
+                    <Field label={isEdmonton
+                      ? "Edmonton Zone — WCB claim related? (must be stated explicitly on the referral letter)"
+                      : "Confirm WCB status"}>
+                      {!isEdmonton && (
+                        <p className="mf-tiny-note" style={{ marginBottom: 6 }}>
+                          A referral requires confirming the patient does not qualify for expedited surgery through WCB — WCB patients may or may not be accepted through FAST depending on the zone's surgeon practices.
+                        </p>
+                      )}
+                      <div className="mf-choice-row">
+                        <button type="button" className={`mf-choice${wcbStatus === "yes" ? " active" : ""}`} onClick={() => setWcbStatus("yes")}>
+                          <div className="mf-choice-title">Yes</div>
+                        </button>
+                        <button type="button" className={`mf-choice${wcbStatus === "no" ? " active" : ""}`} onClick={() => setWcbStatus("no")}>
+                          <div className="mf-choice-title">No</div>
+                        </button>
+                      </div>
+                      {!wcbStatus && <p className="mf-error">WCB status must be confirmed before this referral can be submitted.</p>}
+                    </Field>
+                  )}
+
+                  {reason.notes && (
+                    <div className="mf-info-strip" style={{ flexDirection: "column", alignItems: "stretch" }}>
+                      {reason.notes.map((n) => <span key={n}>{n}</span>)}
+                    </div>
+                  )}
+
+                  {reason.imaging && (
+                    <>
+                      <SectionLabel>Required imaging / investigations{reason.imaging.timeframe ? ` — ${reason.imaging.timeframe}` : ""}</SectionLabel>
+                      <Card>
+                        <ul style={{ margin: 0, paddingLeft: 16, fontSize: 12.5, lineHeight: 1.7, color: "var(--ink-soft)" }}>
+                          {reason.imaging.items.map((i) => <li key={i}>{i}</li>)}
+                        </ul>
+                      </Card>
+                    </>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </div>
+
+        <SummaryCard title="Routing result">
+          <SummaryRow k="Door" v={data.entryDoors.find((d) => d.id === door)?.label || "—"} />
+          {(door === "emergency" || door === "urgent") && (
+            <SummaryRow k="Pathway" v={urgentPathway ? (urgentPathway === "ortho" ? "Orthopedic & Spine" : "Plastic Surgery") : "—"} />
+          )}
+          {door === "urgent" && <SummaryRow k="Zone" v={urgentZone || "—"} />}
+          {door === "non_urgent_referral" && (
+            <>
+              <SummaryRow k="Reason" v={reason?.label || "—"} />
+              {reason && !reason.bypass && !reason.urgent && (
+                <>
+                  <SummaryRow k="Zone" v={zone || "—"} />
+                  <SummaryRow k="Destination" v={destination ? <StatusPillSmall color={destinationTone(destination)}>{destination}</StatusPillSmall> : "—"} />
+                  {needsWcb && <SummaryRow k="WCB" v={wcbStatus ? wcbStatus.toUpperCase() : "Not confirmed"} />}
+                </>
+              )}
+              {reason?.bypass && <SummaryRow k="Route" v="Direct to surgeon — no FAST" />}
+              {reason?.urgent && <SummaryRow k="Window" v={`${reason.weeks} weeks`} />}
+            </>
+          )}
+        </SummaryCard>
+      </div>
+
+      <PageNav onBack={onBack} onNext={canContinue ? handleContinue : undefined} nextLabel="Continue to validation & rules" />
+    </PageShell>
+  );
+}
+
+// The rows a "Triage result" readout is made of — rendered twice: inside the
+// sticky panel that updates live throughout, and again, plain, as the
+// assessment's final step. Both read the same `result`; there is no second
+// computation and no second data-entry surface.
+function TriageResultRows({ result }) {
+  return (
+    <>
+      <SummaryRow k="Condition" v={CONDITION_GROUPS.find((c) => c.id === result.conditionGroup)?.label} />
+      <SummaryRow k="Severity" v={<StatusPillSmall color={MSK_RESULT_TONE[result.severity]}>{result.severity}</StatusPillSmall>} />
+      <SummaryRow k="Urgency" v={<StatusPillSmall color={MSK_RESULT_TONE[result.urgency]}>{result.urgency}</StatusPillSmall>} />
+      <SummaryRow k="Referral" v={result.referralAppropriateness} />
+      {result.missingInfo.length > 0 && (
+        <>
+          <p className="mf-summary-title" style={{ marginTop: 14 }}>Missing information</p>
+          <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11.5, lineHeight: 1.6, color: "var(--amber)", textAlign: "left" }}>
+            {result.missingInfo.map((m) => <li key={m}>{m}</li>)}
+          </ul>
         </>
       )}
-
-      <PageNav onBack={onBack} onNext={onNext} nextLabel="Continue to validation & rules" />
+      <p className="mf-summary-title" style={{ marginTop: 14 }}>Suggested next steps</p>
+      <ul style={{ margin: 0, paddingLeft: 16, fontSize: 11.5, lineHeight: 1.6, color: "var(--ink-soft)", textAlign: "left" }}>
+        {result.nextSteps.map((s, i) => <li key={i}>{s}</li>)}
+      </ul>
     </>
   );
 }
 
-/* ── Stage 3c: Clinical validation + Rules Engine ───────────────────────── */
+// Sticky "Triage result" panel — a live readout of the deterministic engine
+// (mskTriage.js's runMskTriage), derived entirely from the Clinical
+// Assessment answers to its left. Visible from step 1 so severity/urgency
+// update live as sections are filled in.
+function TriageResultPanel({ result }) {
+  const [showLegend, setShowLegend] = useState(false);
+  return (
+    <SummaryCard title={
+      <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        Triage result
+        <button type="button" className="mf-toggle-link" style={{ fontSize: 11, fontWeight: 500 }}
+          onClick={() => setShowLegend((v) => !v)}>
+          {showLegend ? "Hide legend" : "What do these mean?"}
+        </button>
+      </span>
+    }>
+      {showLegend && (
+        <div style={{ textAlign: "left", fontSize: 11.5, lineHeight: 1.6, color: "var(--ink-soft)", background: "var(--paper)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)", padding: "10px 12px", margin: "0 0 14px" }}>
+          <p style={{ fontWeight: 700, color: "var(--ink)", margin: "0 0 2px" }}>Urgency</p>
+          <p style={{ margin: "0 0 8px" }}>
+            <b>Routine</b> — mild/moderate, no red flags · <b>Priority</b> — severe, major functional impairment · <b>Urgent</b> — a red flag (infection, trauma, neuro deficit) is present.
+          </p>
+          <p style={{ fontWeight: 700, color: "var(--ink)", margin: "0 0 2px" }}>Missing information</p>
+          <p style={{ margin: "0 0 8px" }}>
+            What this checks for: symptom duration, severity, functional impact, red flags, physical exam, investigations, management attempted, comorbidities, medications. A flag means that item hasn't been filled in yet.
+          </p>
+          <p style={{ fontWeight: 700, color: "var(--ink)", margin: "0 0 2px" }}>Referral appropriateness</p>
+          <p style={{ margin: 0 }}>
+            <b>Appropriate</b> — meets pathway criteria · <b>Not appropriate yet</b> — conservative management not yet tried · <b>Urgent referral required</b> — a red flag · <b>Consider alternative diagnosis</b> — pattern is atypical.
+          </p>
+        </div>
+      )}
+      <TriageResultRows result={result} />
+    </SummaryCard>
+  );
+}
+
+// Maps a backend field `code` to the dot-path `runMskTriage()` expects.
+// Fixed and pathway-independent: the GEN_* prefix marks exactly the fields
+// every pathway seeds identically for the shared triage engine (see
+// database/seeders/PathwayFieldDefinitionSeeder.php's GENERIC_* constants).
+// IMAGING_CHOICE is handled separately (a presence check, not a passthrough).
+const TRIAGE_FIELD_MAP = {
+  GEN_DURATION: "duration",
+  GEN_PAIN_PATTERN: "symptoms.painPattern",
+  GEN_NUMBNESS_TINGLING: "symptoms.numbnessTingling",
+  GEN_MECHANICAL_SYMPTOMS: "symptoms.mechanicalSymptoms",
+  GEN_SLEEP_DISRUPTION: "symptoms.sleepDisruption",
+  GEN_FUNCTIONAL_IMPACT: "symptoms.functionalImpact",
+  GEN_ROM: "exam.rom",
+  GEN_STRENGTH_DEFICIT: "exam.strengthDeficit",
+  GEN_DEFORMITY_ATROPHY: "exam.deformityAtrophy",
+  GEN_THENAR_ATROPHY: "exam.thenarAtrophy",
+  GEN_THUMB_WEAKNESS: "exam.thumbWeakness",
+  GEN_FROZEN_SHOULDER: "exam.frozenShoulder",
+  GEN_MOTOR_DEFICIT: "exam.motorDeficit",
+  GEN_LABS_STATUS: "investigations.labs",
+  GEN_MANAGEMENT_TRIED: "management.tried",
+  GEN_MANAGEMENT_WEEKS: "management.weeks",
+  GEN_MANAGEMENT_RESPONSE: "management.response",
+  GEN_MEDICATIONS: "medications",
+  COMORBIDITIES: "comorbidities",
+  ATYPICAL_PRESENT: "atypical.present",
+  ATYPICAL_SUGGESTION: "atypical.suggestion",
+};
+
+function setPath(obj, path, value) {
+  const parts = path.split(".");
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) cur = cur[parts[i]];
+  cur[parts[parts.length - 1]] = value;
+}
+
+function buildTriageInput(conditionGroup, values, triggeredRedFlags) {
+  const input = {
+    conditionGroup,
+    duration: "",
+    symptoms: { painPattern: "", numbnessTingling: false, mechanicalSymptoms: false, sleepDisruption: "", functionalImpact: "" },
+    redFlagActive: triggeredRedFlags.length > 0,
+    redFlagLabels: triggeredRedFlags.map((f) => f.red_flag_category?.name || f.name),
+    exam: { rom: "", strengthDeficit: "", deformityAtrophy: false, thenarAtrophy: false, thumbWeakness: false, frozenShoulder: false, motorDeficit: false },
+    investigations: { imaging: values.IMAGING_CHOICE ? "done" : "", labs: "" },
+    management: { tried: "", weeks: "", response: "" },
+    comorbidities: "", medications: "",
+    atypical: { present: false, suggestion: "" },
+  };
+  for (const [code, path] of Object.entries(TRIAGE_FIELD_MAP)) {
+    if (values[code] !== undefined) setPath(input, path, values[code]);
+  }
+  return input;
+}
+
+function toneForSeverity(severity) {
+  return severity === "moderate" ? "amber" : "clay";
+}
+
+function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, onNext, onBack }) {
+  const sectionByCode = Object.fromEntries(definition.sections.map((s) => [s.code, s]));
+
+  // Computed once per mount — this component is remounted (via `key`, the
+  // pathway's DB id) every time the pathway tab changes, so there's no
+  // stale-suggestion risk.
+  const [aiFilled, setAiFilled] = useState(() => inferClinicalFieldsFromSections(definition, sections));
+  const [values, setValues] = useState(() => ({ ...aiFilled }));
+  const setValue = (code, v) => {
+    setValues((prev) => ({ ...prev, [code]: v }));
+    setAiFilled((prev) => {
+      if (!(code in prev)) return prev;
+      const next = { ...prev };
+      delete next[code];
+      return next;
+    });
+  };
+  const clearAllAiSuggestions = () => { setValues({}); setAiFilled({}); };
+  const aiCount = Object.keys(aiFilled).length;
+
+  // Step 1 — Eligibility
+  const eligibilityField = sectionByCode.eligibility?.fields[0];
+  const [eligible, setEligible] = useState(true);
+
+  // Step 2 — History & details: pathway-specific fields plus the shared
+  // triage-relevant (GEN_*) fields that used to be asked a second time on
+  // the old MSK Triage page. Grouping is by field-code convention, not a
+  // per-pathway config, so it needs no changes when a pathway's fields do.
+  const [historyDone, setHistoryDone] = useState(false);
+  const historyFields = sectionByCode.history?.fields || [];
+  const pathwaySelects = historyFields.filter((f) => f.field_type === "select" && !f.code.startsWith("GEN_"));
+  const symptomFields = historyFields.filter((f) => f.code.startsWith("SYMPTOM_"));
+  const comorbField = historyFields.find((f) => f.code === "COMORBIDITIES");
+  const genSelects = historyFields.filter((f) => f.code.startsWith("GEN_") && f.field_type === "select");
+  const genChecks = historyFields.filter((f) => f.code.startsWith("GEN_") && f.field_type === "checkbox");
+
+  // Step 3 — Red-flag screening: never auto-filled. Checking any item here
+  // both shows that flag's own recommended action and is what makes the
+  // deterministic engine's urgency "Urgent".
+  const [redFlagsDone, setRedFlagsDone] = useState(false);
+  const redFlagFields = sectionByCode.red_flags?.fields || [];
+  const triggeredFlags = redFlagFields.filter((f) => values[f.code]);
+
+  // Step 4 — Anatomical / differential (pathway-specific, optional)
+  const anatomicalSection = sectionByCode.anatomical;
+  const anatomicalField = anatomicalSection?.fields[0];
+  const anatomicalValue = anatomicalField && values[anatomicalField.code];
+  const anatomicalDetail = anatomicalValue && anatomicalField.display_config?.options_detail?.[anatomicalValue];
+  // Same gate the pathway walkthrough always used to reveal imaging +
+  // management together — now reveals every remaining section (Examination
+  // onward) as one continuous block.
+  const restRevealed = anatomicalField ? Boolean(anatomicalValue) : redFlagsDone;
+
+  let stepNum = 4;
+  const anatomicalStepNum = anatomicalField ? stepNum++ : null;
+  const examStepNum = stepNum++;
+  const investigationsStepNum = stepNum++;
+  const managementStepNum = stepNum++;
+  const finalStepNum = stepNum++;
+
+  // Step 5 — Examination: every field (shared ROM/strength/deformity plus
+  // any pathway-specific overlay checkboxes, e.g. GEN_THENAR_ATROPHY for
+  // CTS) renders generically by field_type — no per-condition-group branch.
+  const examFields = sectionByCode.examination?.fields || [];
+
+  // Step 6 — Investigations
+  const investigationFields = sectionByCode.investigations?.fields || [];
+
+  // Step 7 — Management: injection-type fields (code prefix "INJECTION_")
+  // get their own sub-heading and a conditional warning banner (sourced from
+  // PathwayService's display_config.warning enrichment); everything else is
+  // a generic checklist item or a shared GEN_* trial field.
+  const managementFields = sectionByCode.management?.fields || [];
+  const injectionFields = managementFields.filter((f) => f.code.startsWith("INJECTION_"));
+  const checklistFields = managementFields.filter((f) => f.field_type === "checkbox" && !f.code.startsWith("INJECTION_"));
+  const managementSelects = managementFields.filter((f) => f.field_type === "select");
+  const managementNumbers = managementFields.filter((f) => f.field_type === "number");
+  const managementTexts = managementFields.filter((f) => f.field_type === "text");
+
+  // Step 8 — Final assessment
+  const finalFields = sectionByCode.final_assessment?.fields || [];
+  const atypicalCheckbox = finalFields.find((f) => f.field_type === "checkbox");
+  const atypicalText = finalFields.find((f) => f.field_type === "text");
+
+  const result = runMskTriage(buildTriageInput(conditionGroup, values, triggeredFlags));
+
+  return (
+    <div className="mf-two-col">
+      <div>
+        {aiCount > 0 && (
+          <div className="mf-ai-banner">
+            <span><Sparkles size={13} style={{ verticalAlign: -2, marginRight: 6 }} />
+              {aiCount} field{aiCount === 1 ? "" : "s"} pre-filled from the AI extraction — review each before continuing.</span>
+            <button type="button" className="mf-mini-btn ghost" onClick={clearAllAiSuggestions}>Clear AI suggestions</button>
+          </div>
+        )}
+
+        <SectionLabel>1. Initial eligibility</SectionLabel>
+        <Card>
+          {eligibilityField && (
+            <>
+              <CheckField label={eligibilityField.name} checked={eligible} onChange={setEligible} />
+              {!eligible && eligibilityField.display_config?.warning && (
+                <div className="mf-info-strip" style={{ marginTop: 10 }}>
+                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  {eligibilityField.display_config.warning}
+                </div>
+              )}
+            </>
+          )}
+        </Card>
+
+        {eligible && (
+          <>
+            <SectionLabel>2. History & details</SectionLabel>
+            <Card>
+              <div className="mf-field-grid">
+                {pathwaySelects.map((f) => (
+                  <PillGroup key={f.code} label={f.name} value={values[f.code]} aiValue={aiFilled[f.code]}
+                    onChange={(v) => setValue(f.code, v)} options={f.options} />
+                ))}
+              </div>
+              {symptomFields.length > 0 && (
+                <Field label="Symptoms — check all that apply">
+                  {symptomFields.map((f) => (
+                    <CheckField key={f.code} label={f.name}
+                      checked={Boolean(values[f.code])} ai={Boolean(aiFilled[f.code])}
+                      onChange={(v) => setValue(f.code, v)} />
+                  ))}
+                </Field>
+              )}
+
+              <div className="mf-field-grid" style={{ marginTop: 12 }}>
+                {genSelects.map((f) => (
+                  <PillGroup key={f.code} label={f.name} value={values[f.code]} aiValue={aiFilled[f.code]}
+                    onChange={(v) => setValue(f.code, v)} options={f.options} />
+                ))}
+              </div>
+              {genChecks.map((f) => (
+                <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={Boolean(aiFilled[f.code])}
+                  onChange={(v) => setValue(f.code, v)} />
+              ))}
+
+              {comorbField && (
+                <Field label={<>{comorbField.name} {aiFilled[comorbField.code] !== undefined && <AiBadge />}</>}>
+                  <input type="text" className="mf-input" style={{ width: "100%", maxWidth: 420, boxSizing: "border-box" }}
+                    placeholder={comorbField.display_config?.placeholder} value={values[comorbField.code] || ""}
+                    onChange={(e) => setValue(comorbField.code, e.target.value)} />
+                </Field>
+              )}
+              {!historyDone && (
+                <button className="mf-primary-btn" onClick={() => setHistoryDone(true)} style={{ marginTop: 4 }}>
+                  Continue to red-flag screening <ArrowRight size={15} />
+                </button>
+              )}
+            </Card>
+          </>
+        )}
+
+        {historyDone && (
+          <>
+            <SectionLabel>3. Red-flag screening</SectionLabel>
+            <Card style={{ borderColor: "#E3B8B4" }}>
+              <p style={{ fontSize: 12.5, color: "var(--ink-soft)", margin: "0 0 12px" }}>
+                Check any that apply based on history and exam. Any selection drives the triage result to Urgent.
+              </p>
+              <div className="mf-info-strip" style={{ margin: "0 0 12px", background: "transparent", border: "1px dashed #E3B8B4", color: "var(--clay)" }}>
+                <Info size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+                Never auto-filled from the AI extraction — check these only from your own reading of the note and exam.
+              </div>
+              <div className="mf-field-grid">
+                {redFlagFields.map((f) => (
+                  <div key={f.code} style={{ background: "var(--paper)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)", padding: "10px 12px" }}>
+                    <CheckField label={f.name} danger hint={f.red_flag_category?.description}
+                      checked={Boolean(values[f.code])} onChange={(v) => setValue(f.code, v)} />
+                  </div>
+                ))}
+              </div>
+              {triggeredFlags.map((f) => (
+                <AlertBanner key={f.code} tone={toneForSeverity(f.red_flag_category?.severity)}
+                  title={`${f.red_flag_category?.name || f.name} — action required`}>
+                  {f.red_flag_category?.action || "Escalate per this pathway's guidance."}
+                </AlertBanner>
+              ))}
+              {!redFlagsDone && (
+                <button className="mf-primary-btn" onClick={() => setRedFlagsDone(true)} style={{ marginTop: 12 }}>
+                  {triggeredFlags.length > 0 ? "Acknowledged — continue anyway" : "No red flags — continue"} <ArrowRight size={15} />
+                </button>
+              )}
+            </Card>
+          </>
+        )}
+
+        {redFlagsDone && anatomicalField && (
+          <>
+            <SectionLabel>{anatomicalStepNum}. {anatomicalSection.name}</SectionLabel>
+            <Card>
+              <div className="mf-channel-row" style={{ flexWrap: "wrap" }}>
+                {anatomicalField.options.map((o) => (
+                  <button type="button" key={o.value} className={`mf-channel-btn${anatomicalValue === o.value ? " active" : ""}`}
+                    onClick={() => setValue(anatomicalField.code, o.value)} style={{ flex: "1 1 140px" }}>
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+              {anatomicalDetail && (
+                <div style={{ marginTop: 14 }}>
+                  <p className="mf-section-title">
+                    Differential diagnoses — {anatomicalField.options.find((o) => o.value === anatomicalValue)?.label}
+                  </p>
+                  <ul style={{ margin: "6px 0 0", paddingLeft: 18, fontSize: 13, lineHeight: 1.7 }}>
+                    {(anatomicalDetail.differentials || []).map((d) => <li key={d}>{d}</li>)}
+                  </ul>
+                  {anatomicalDetail.warning && (
+                    <div className="mf-info-strip" style={{ marginTop: 10 }}>
+                      <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                      {anatomicalDetail.warning}
+                    </div>
+                  )}
+                </div>
+              )}
+            </Card>
+          </>
+        )}
+
+        {restRevealed && (
+          <>
+            <SectionLabel>{examStepNum}. Examination</SectionLabel>
+            <Card>
+              <div className="mf-field-grid">
+                {examFields.filter((f) => f.field_type === "select").map((f) => (
+                  <PillGroup key={f.code} label={f.name} value={values[f.code]} aiValue={aiFilled[f.code]}
+                    onChange={(v) => setValue(f.code, v)} options={f.options} />
+                ))}
+              </div>
+              {examFields.filter((f) => f.field_type === "checkbox").map((f) => (
+                <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={Boolean(aiFilled[f.code])}
+                  onChange={(v) => setValue(f.code, v)} />
+              ))}
+            </Card>
+
+            <SectionLabel>{investigationsStepNum}. Investigations</SectionLabel>
+            <Card>
+              {investigationFields.filter((f) => f.field_type === "select").map((f) => (
+                <PillGroup key={f.code} label={f.name} value={values[f.code]} aiValue={aiFilled[f.code]}
+                  onChange={(v) => setValue(f.code, v)} options={f.options} />
+              ))}
+            </Card>
+
+            <SectionLabel>{managementStepNum}. Management</SectionLabel>
+            <Card>
+              <p className="mf-section-title">Conservative / non-operative plan</p>
+              <div className="mf-field-grid">
+                {checklistFields.map((f) => (
+                  <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={Boolean(aiFilled[f.code])}
+                    onChange={(v) => setValue(f.code, v)} />
+                ))}
+              </div>
+
+              {injectionFields.length > 0 && (
+                <>
+                  <p className="mf-section-title" style={{ marginTop: 14 }}>Injection considerations</p>
+                  {injectionFields.map((f) => (
+                    <div key={f.code}>
+                      <CheckField label={f.name} checked={Boolean(values[f.code])} onChange={(v) => setValue(f.code, v)} />
+                      {f.display_config?.warning && values[f.code] && (
+                        <div className="mf-verdict mf-verdict-gap" style={{ background: "var(--clay-soft)", color: "var(--clay)", marginTop: 4, marginBottom: 8 }}>
+                          <AlertTriangle size={14} /> {f.display_config.warning}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </>
+              )}
+
+              <p className="mf-section-title" style={{ marginTop: 14 }}>Conservative management trial</p>
+              <div className="mf-field-grid">
+                {managementSelects.map((f) => (
+                  <PillGroup key={f.code} label={f.name} value={values[f.code]} aiValue={aiFilled[f.code]}
+                    onChange={(v) => setValue(f.code, v)} options={f.options} />
+                ))}
+                {managementNumbers.map((f) => (
+                  <Field key={f.code} label={<>{f.name} {aiFilled[f.code] !== undefined && <AiBadge />}</>}>
+                    <input type="number" min="0" className="mf-input" style={{ width: 120 }}
+                      value={values[f.code] || ""} onChange={(e) => setValue(f.code, e.target.value)} />
+                  </Field>
+                ))}
+              </div>
+              {managementTexts.map((f) => (
+                <Field key={f.code} label={<>{f.name} {aiFilled[f.code] !== undefined && <AiBadge />}</>}>
+                  <textarea className="mf-textarea" style={{ minHeight: 56 }} value={values[f.code] || ""}
+                    onChange={(e) => setValue(f.code, e.target.value)} />
+                </Field>
+              ))}
+
+              {definition.follow_up && (
+                <div className="mf-info-strip" style={{ marginTop: 16 }}>
+                  <ScrollText size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  {definition.follow_up}
+                </div>
+              )}
+              <button className="mf-ghost-btn" onClick={() => window.print()} style={{ marginTop: 12 }}>
+                Print summary
+              </button>
+            </Card>
+
+            <SectionLabel>{finalStepNum}. Final assessment</SectionLabel>
+            <Card>
+              {atypicalCheckbox && (
+                <CheckField label={atypicalCheckbox.name}
+                  hint="Overlaps with neuropathy, cervical radiculopathy, RA, hip OA, piriformis, etc."
+                  checked={Boolean(values[atypicalCheckbox.code])} onChange={(v) => setValue(atypicalCheckbox.code, v)} />
+              )}
+              {atypicalCheckbox && values[atypicalCheckbox.code] && atypicalText && (
+                <Field label={atypicalText.name}>
+                  <input type="text" className="mf-input" style={{ maxWidth: 320 }}
+                    placeholder="e.g. neurology, rheumatology, spine, hip"
+                    value={values[atypicalText.code] || ""} onChange={(e) => setValue(atypicalText.code, e.target.value)} />
+                </Field>
+              )}
+              <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
+                <p className="mf-summary-title" style={{ marginBottom: 8 }}>Triage result</p>
+                <TriageResultRows result={result} />
+              </div>
+            </Card>
+          </>
+        )}
+
+        <div className="mf-info-strip">
+          <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+          Deterministic decision support only — not a diagnosis. A physician must review every field and finding before proceeding.
+        </div>
+
+        <PageNav onBack={onBack} onNext={onNext} nextLabel="Continue to validation & rules" />
+      </div>
+
+      <TriageResultPanel result={result} />
+    </div>
+  );
+}
+
+/* ── Stage 3b: Clinical validation + Rules Engine ───────────────────────── */
 
 function PageValidation({ signal, genericSignals, loading, error, ready, onRetry, onNext, onBack }) {
   return (
