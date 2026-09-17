@@ -3,10 +3,12 @@
  * The frontend talks ONLY to the backend. It never knows the AI service URL,
  * never holds AI credentials, never sees AI-provider error detail.
  *
- *   submitExtraction({ note, pathway, caseId }) -> POST /api/v1/ai/extractions   (202)
- *   getExtraction(id)                           -> GET  /api/v1/ai/extractions/{id}
- *   retryExtraction(id)                         -> POST /api/v1/ai/extractions/{id}/retry
- *   listExtractions({ caseId, status })         -> GET  /api/v1/ai/extractions
+ *   submitExtraction({ note, pathway, caseId })           -> POST /api/v1/ai/extractions   (202)
+ *   submitPathwayFormExtraction({ note, pathwayId, caseId }) -> POST /api/v1/ai/extractions (202)
+ *   getExtraction(id)                                     -> GET  /api/v1/ai/extractions/{id}
+ *   getAutoFill(extractionId, pathwayId)                  -> GET  /api/v1/ai/extractions/{id}/autofill
+ *   retryExtraction(id)                                   -> POST /api/v1/ai/extractions/{id}/retry
+ *   listExtractions({ caseId, status })                   -> GET  /api/v1/ai/extractions
  *
  * All routes require a Sanctum bearer token (VITE_API_TOKEN in dev, or set
  * setApiToken() after login). The backend forwards the note to the AI service,
@@ -121,6 +123,52 @@ export function evaluateRules({ sections, pathway }) {
       extraction: { sections },
       ...(pathway ? { pathway } : {}),
     }),
+  })
+    .then(parse)
+    .then((b) => b.data);
+}
+
+/**
+ * Queues a pathway-form-extraction job — the ai-service answers the
+ * selected pathway's own intake-form fields directly from the note
+ * (validated server-side against each field's own type/options), instead of
+ * returning free text for client-side keyword matching. `pathwayId` is
+ * required (the backend resolves that pathway's AI-fillable fields from its
+ * own database — see PathwayService::aiFillableFields()). Poll the returned
+ * record with getExtraction()/isTerminal(), same as an extraction, then
+ * call getAutoFill() once it completes.
+ *
+ * @returns {Promise<{id: string, status: string}>} the queued AI request
+ */
+export function submitPathwayFormExtraction({ note, pathwayId, caseId }) {
+  return fetch(`${BASE}/v1/ai/extractions`, {
+    method: "POST",
+    headers: headers({ "content-type": "application/json" }),
+    body: JSON.stringify({
+      note,
+      type: "pathway_form_extraction",
+      pathway_id: pathwayId,
+      ...(caseId ? { case_id: caseId } : {}),
+    }),
+  })
+    .then(parse)
+    .then((b) => b.data);
+}
+
+/**
+ * Overlays a completed extraction's facts onto `pathwayId`'s form
+ * definition, keyed by field code — works for either a grounded or a
+ * pathway-form extraction id (the backend picks the matching strategy).
+ *
+ * @returns {Promise<{
+ *   pathway: object, version: object,
+ *   sections: {code: string, name: string, fields: {code: string, field_type: string, value: *}[]}[]
+ * }>}
+ */
+export function getAutoFill(extractionId, pathwayId) {
+  const q = new URLSearchParams({ pathway_id: pathwayId });
+  return fetch(`${BASE}/v1/ai/extractions/${extractionId}/autofill?${q}`, {
+    headers: headers(),
   })
     .then(parse)
     .then((b) => b.data);

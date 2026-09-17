@@ -19,12 +19,16 @@
  * plan.
  *
  * Returns a flat map keyed by field `code` (e.g. "ONSET", "SYMPTOM_1",
- * "GEN_ROM") -> the suggested value (option `value` for selects, `true` for
- * checkboxes, text for text fields).
+ * "GEN_ROM") -> the suggested value (option `value` for selects, text for
+ * text fields, and for checkboxes either `true` — the note supports it — or
+ * `false` — the note explicitly denies it, e.g. "denies numbness". A
+ * checkbox this heuristic never addressed at all is simply absent from the
+ * map, same as before; only an unambiguous denial gets an explicit `false`).
  */
 
 import {
-  findPositive, textBlob, COMORBIDITY_KEYWORDS, matchedKeywords, bagPositive, pickMentionedOption,
+  findPositive, findNegated, textBlob, COMORBIDITY_KEYWORDS, matchedKeywords,
+  bagPositive, bagNegated, pickMentionedOption,
 } from "./textMatch.js";
 
 const MEDICATION_KEYWORDS = [
@@ -92,8 +96,14 @@ export function inferClinicalFieldsFromSections(definition, sections) {
       const hit = pickMentionedOptionValue(lower, field.options);
       if (hit !== undefined) out[field.code] = hit;
     } else if (strategy === "keyword_bag") {
+      // keyword_bag is only ever seeded on checkbox fields (see
+      // PathwayFieldDefinitionSeeder), so an explicit denial ("denies
+      // locking") is a real false suggestion, not just silence — surfaced
+      // the same way as a positive hit, just unchecked.
       if (bagPositive(lower, field.name) || findPositive(lower, [field.name.toLowerCase()])) {
         out[field.code] = true;
+      } else if (bagNegated(lower, field.name) || findNegated(lower, [field.name.toLowerCase()])) {
+        out[field.code] = false;
       }
     } else if (strategy === "comorbidity_keywords") {
       const hits = matchedKeywords(lower, COMORBIDITY_KEYWORDS);
@@ -122,8 +132,14 @@ export function inferClinicalFieldsFromSections(definition, sections) {
   else if (findPositive(lower, ["daily pain", "frequent pain", "worse when", "worse with"])) out["GEN_PAIN_PATTERN"] = "daily_frequent";
   else if (findPositive(lower, ["intermittent", "occasional pain", "comes and goes"])) out["GEN_PAIN_PATTERN"] = "intermittent";
 
-  if (findPositive(lower, ["numbness", "tingling", "pins and needles", "paresthesia"])) out["GEN_NUMBNESS_TINGLING"] = true;
-  if (findPositive(lower, ["locking", "catching", "giving way", "clicking"])) out["GEN_MECHANICAL_SYMPTOMS"] = true;
+  const NUMBNESS_PHRASES = ["numbness", "tingling", "pins and needles", "paresthesia"];
+  if (findPositive(lower, NUMBNESS_PHRASES)) out["GEN_NUMBNESS_TINGLING"] = true;
+  else if (findNegated(lower, NUMBNESS_PHRASES)) out["GEN_NUMBNESS_TINGLING"] = false;
+
+  const MECHANICAL_PHRASES = ["locking", "catching", "giving way", "clicking"];
+  if (findPositive(lower, MECHANICAL_PHRASES)) out["GEN_MECHANICAL_SYMPTOMS"] = true;
+  else if (findNegated(lower, MECHANICAL_PHRASES)) out["GEN_MECHANICAL_SYMPTOMS"] = false;
+
   if (findPositive(lower, ["wakes at night", "night pain", "disturbed sleep", "difficulty sleeping"])) out["GEN_SLEEP_DISRUPTION"] = "present";
 
   if (findPositive(lower, ["unable to work", "cannot work", "unable to walk", "difficulty walking", "affecting work"])) {
@@ -141,7 +157,9 @@ export function inferClinicalFieldsFromSections(definition, sections) {
   else if (findPositive(lower, ["strength intact", "full strength"])) out["GEN_STRENGTH_DEFICIT"] = "none";
   else if (findPositive(lower, ["weakness"])) out["GEN_STRENGTH_DEFICIT"] = "moderate";
 
-  if (findPositive(lower, ["deformity", "atrophy", "wasting"])) out["GEN_DEFORMITY_ATROPHY"] = true;
+  const DEFORMITY_PHRASES = ["deformity", "atrophy", "wasting"];
+  if (findPositive(lower, DEFORMITY_PHRASES)) out["GEN_DEFORMITY_ATROPHY"] = true;
+  else if (findNegated(lower, DEFORMITY_PHRASES)) out["GEN_DEFORMITY_ATROPHY"] = false;
 
   if (findPositive(lower, ["blood test showed", "labs showed", "bloodwork showed", "crp elevated", "esr elevated"])) {
     out["GEN_LABS_STATUS"] = "done";

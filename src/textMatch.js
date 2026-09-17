@@ -31,6 +31,28 @@ export function findPositive(lower, phrases) {
   return false;
 }
 
+/** True only when `phrases` are mentioned exclusively in negated form — an
+ * explicit denial ("denies numbness") rather than the field simply never
+ * coming up. False both when there's no mention at all and when any
+ * mention is non-negated, so this only fires on a clean, unambiguous "no". */
+export function findNegated(lower, phrases) {
+  let sawNegated = false;
+  for (const phrase of phrases) {
+    let from = 0;
+    while (true) {
+      const idx = lower.indexOf(phrase, from);
+      if (idx === -1) break;
+      if (isNegated(lower, idx, phrase.length)) {
+        sawNegated = true;
+      } else {
+        return false;
+      }
+      from = idx + phrase.length;
+    }
+  }
+  return sawNegated;
+}
+
 export function textBlob(sections) {
   return sections.map((s) => `${s.title || ""}. ${s.content || ""}`).join(" ");
 }
@@ -89,6 +111,17 @@ export function bagPositive(lower, phrase) {
   const words = significantWords(phrase);
   if (words.length === 0) return false;
   const hits = words.filter((w) => findPositive(lower, [w]));
+  const needed = words.length === 1 ? 1 : Math.max(2, Math.ceil(words.length * 0.6));
+  return hits.length >= needed;
+}
+
+/** Same majority-of-significant-words shape as bagPositive, but for an
+ * explicit denial (see findNegated) — used to suggest "AI says no" on a
+ * checkbox instead of leaving it unaddressed. */
+export function bagNegated(lower, phrase) {
+  const words = significantWords(phrase);
+  if (words.length === 0) return false;
+  const hits = words.filter((w) => findNegated(lower, [w]));
   const needed = words.length === 1 ? 1 : Math.max(2, Math.ceil(words.length * 0.6));
   return hits.length >= needed;
 }

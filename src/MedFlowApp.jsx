@@ -20,7 +20,8 @@ import { CONDITION_GROUPS, runMskTriage } from "./mskTriage.js";
 import { inferClinicalFieldsFromSections } from "./clinicalAutoFill.js";
 import {
   getCurrentUser, listCaseTypes, listWorkflowTemplates, createPatient, createCase,
-  submitExtraction, getExtraction, retryExtraction, isTerminal, evaluateRules,
+  submitExtraction, submitPathwayFormExtraction, getAutoFill, getExtraction,
+  retryExtraction, isTerminal, evaluateRules,
   submitPathwayValidation, analyzeAttachment, listPathways, getPathwayDefinition,
   getReferralRoutingCatalog, getCaseReferralRouting, submitCaseReferralRouting,
 } from "./api.js";
@@ -210,9 +211,23 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
     if (match) setSelectedPathwayId(match.id);
   }, [pathways, clinicalCondition, selectedPathwayId]);
   // The selected pathway's DB field definition (sections -> fields ->
-  // options/AI-fill mapping) — fetched after case creation, held for a
-  // future AI-fill step; nothing consumes it yet.
+  // options/AI-fill mapping) — fetched after case creation. Used below to
+  // resolve a field's human-readable name/option label for the "pathway
+  // form" tab on the AI extraction page (getAutoFill()'s own response only
+  // carries {code, field_type, value}, not the display metadata).
   const [pathwayDefinition, setPathwayDefinition] = useState(null);
+
+  // Pathway-form extraction: a real AI job, queued alongside the grounded
+  // extraction whenever a pathway is selected. The model answers the
+  // pathway's own form fields directly (validated server-side against each
+  // field's type/options) rather than free text for client-side matching.
+  // Polled like pathwayJob/imagingJob below; feeds aiFieldValues (Clinical
+  // Assessment overlay) and formFillResult (AI extraction page display)
+  // once done.
+  const [formFillJob, setFormFillJob] = useState(null);
+  const [formFillSubmitError, setFormFillSubmitError] = useState(null);
+  const [aiFieldValues, setAiFieldValues] = useState(null);
+  const [formFillResult, setFormFillResult] = useState(null);
 
   const [notes, setNotes] = useState("");
   const [files, setFiles] = useState([]);
@@ -379,6 +394,15 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
             console.log(`Pathway definition loaded: ${def.pathway.name} — ${def.sections.length} sections, ${fieldCount} fields`, def);
           })
           .catch(() => {});
+
+        // Also ask the model to answer this pathway's own form fields
+        // directly from the note — feeds Clinical Assessment's AI-suggested
+        // values (see aiFieldValues below), in parallel with the grounded
+        // extraction above.
+        setFormFillSubmitError(null);
+        submitPathwayFormExtraction({ note: notes, pathwayId: selectedPathwayId, caseId: newCase.id })
+          .then(setFormFillJob)
+          .catch((err) => setFormFillSubmitError(err.message || "Could not start AI form-fill."));
       }
 
       const imageAttachment = newCase.attachments?.find((a) => a.mime_type?.startsWith("image/"));
@@ -443,6 +467,39 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
     return () => { cancelled = true; clearInterval(t); };
   }, [imagingJob?.id, imagingJob?.status]);
 
+  useEffect(() => {
+    if (!formFillJob || isTerminal(formFillJob.status)) return undefined;
+    const id = formFillJob.id;
+    let cancelled = false;
+    const t = setInterval(async () => {
+      try {
+        const updated = await getExtraction(id);
+        if (!cancelled) setFormFillJob(updated);
+      } catch {
+        // transient network error — the next tick retries
+      }
+    }, 2500);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [formFillJob?.id, formFillJob?.status]);
+
+  // Once the form-fill job completes, overlay its answers onto the
+  // selected pathway's form — {code: value}, the same shape
+  // clinicalAutoFill.js's client-side heuristic produces, so
+  // DynamicClinicalAssessmentForm doesn't need to know which one filled it.
+  useEffect(() => {
+    if (formFillJob?.status !== "completed" || !selectedPathwayId) return;
+    getAutoFill(formFillJob.id, selectedPathwayId)
+      .then((data) => {
+        setFormFillResult(data);
+        const flat = {};
+        data.sections.forEach((s) => s.fields.forEach((f) => {
+          if (f.value !== null && f.value !== undefined) flat[f.code] = f.value;
+        }));
+        setAiFieldValues(flat);
+      })
+      .catch(() => {}); // keep the client-side heuristic fallback
+  }, [formFillJob?.id, formFillJob?.status, selectedPathwayId]);
+
   const handleExtractionCompleted = useCallback((secs) => {
     setSections(secs);
     // AI pre-fill for Clinical Assessment happens inside the assessment form
@@ -487,10 +544,13 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
               <PageExtraction extraction={extraction} setExtraction={setExtraction}
                 sections={sections} setSections={setSections}
                 imagingJob={imagingJob} imagingSubmitError={imagingSubmitError}
+                formFillJob={formFillJob} formFillSubmitError={formFillSubmitError}
+                formFillResult={formFillResult} pathwayDefinition={pathwayDefinition}
                 onCompleted={handleExtractionCompleted} onNext={next} onBack={back} />
             )}
             {page === "clinical-assessment" && (
               <PageClinicalAssessment conditionGroup={clinicalCondition} pathways={pathways} sections={sections}
+                aiFieldValues={aiFieldValues} formFillStatus={formFillJob?.status}
                 onChangeConditionGroup={setClinicalCondition}
                 onNext={() => { runValidation(sections); next(); }} onBack={back} />
             )}
@@ -801,9 +861,13 @@ function PageIntake({ pathways, clinicalCondition, onChangePathway, notes, setNo
 
 /* ── Stage 2a: AI extraction ───────────────────────────────────────────── */
 
-function PageExtraction({ extraction, setExtraction, sections, setSections, imagingJob, imagingSubmitError, onCompleted, onNext, onBack }) {
+function PageExtraction({
+  extraction, setExtraction, sections, setSections, imagingJob, imagingSubmitError,
+  formFillJob, formFillSubmitError, formFillResult, pathwayDefinition,
+  onCompleted, onNext, onBack,
+}) {
   const [showNote, setShowNote] = useState(false);
-  const [mode, setMode] = useState("extraction"); // extraction | imaging
+  const [mode, setMode] = useState("extraction"); // extraction | imaging | form_fill
   const [editing, setEditing] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [retrying, setRetrying] = useState(false);
@@ -818,6 +882,30 @@ function PageExtraction({ extraction, setExtraction, sections, setSections, imag
         : (imagingJob.error?.message || "Imaging analysis failed."))
       : null
   );
+
+  // Pathway-form extraction: the model's own per-field answers for the
+  // selected pathway, alongside the generic grounded extraction above. See
+  // GET /v1/pathway-form-extractions/{id} (ai-service) via
+  // AutoFillController — formFillResult only carries {code, field_type,
+  // value}, so field names/option labels are resolved from
+  // pathwayDefinition (fetched once at case creation) by code.
+  const hasFormFill = Boolean(formFillJob || formFillSubmitError);
+  const formFillPending = Boolean(formFillJob && !isTerminal(formFillJob.status));
+  const formFillReady = Boolean(formFillJob?.status === "completed" && formFillResult);
+  const formFillFailed = formFillJob?.status === "failed";
+  const formFillErrorMessage = formFillSubmitError || (
+    formFillFailed ? (formFillJob.error?.message || "Pathway form extraction failed.") : null
+  );
+  const fieldMetaByCode = {};
+  (pathwayDefinition?.sections || []).forEach((s) => s.fields.forEach((f) => { fieldMetaByCode[f.code] = f; }));
+  const formatFieldValue = (field, value) => {
+    if (value === true) return "Yes";
+    if (value === false) return "No";
+    if (field.field_type === "select") {
+      return fieldMetaByCode[field.code]?.options?.find((o) => o.value === value)?.label ?? value;
+    }
+    return value;
+  };
   const live = Boolean(extraction);
   const r = extraction || AI_REQUEST;
   const pending = live && !isTerminal(r.status);
@@ -936,14 +1024,61 @@ function PageExtraction({ extraction, setExtraction, sections, setSections, imag
 
       {!pending && !failed && !missingResult && (
         <>
-          {hasImaging && (
+          {(hasImaging || hasFormFill) && (
             <div className="mf-tabs">
               <button className={`mf-tab${mode === "extraction" ? " active" : ""}`} onClick={() => setMode("extraction")}>Extraction</button>
-              <button className={`mf-tab${mode === "imaging" ? " active" : ""}`} onClick={() => setMode("imaging")}>Imaging findings</button>
+              {hasImaging && (
+                <button className={`mf-tab${mode === "imaging" ? " active" : ""}`} onClick={() => setMode("imaging")}>Imaging findings</button>
+              )}
+              {hasFormFill && (
+                <button className={`mf-tab${mode === "form_fill" ? " active" : ""}`} onClick={() => setMode("form_fill")}>Pathway form</button>
+              )}
             </div>
           )}
 
-          {mode === "imaging" ? (
+          {mode === "form_fill" ? (
+            <>
+              {formFillPending && (
+                <div className="mf-info-strip">
+                  <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  Answering this pathway's form fields from the note… this can take up to a minute on CPU.
+                </div>
+              )}
+              {formFillErrorMessage && (
+                <div className="mf-info-strip">
+                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  {formFillErrorMessage}
+                </div>
+              )}
+              {formFillReady && (
+                <>
+                  <div className="mf-provenance">
+                    <span className="mf-prov-pill">pathway <b>{formFillResult.pathway?.name}</b></span>
+                  </div>
+                  {formFillResult.sections.map((s) => {
+                    const answered = s.fields.filter((f) => f.value !== null && f.value !== undefined);
+                    if (answered.length === 0) return null;
+                    return (
+                      <Card key={s.code} style={{ marginTop: 8 }}>
+                        <p className="mf-section-title">{s.name}</p>
+                        {answered.map((f) => (
+                          <div key={f.code} className="mf-summary-row">
+                            <span className="mf-summary-key">{fieldMetaByCode[f.code]?.name || f.code}</span>
+                            <span className="mf-summary-val">{formatFieldValue(f, f.value)}</span>
+                          </div>
+                        ))}
+                      </Card>
+                    );
+                  })}
+                  <div className="mf-info-strip" style={{ marginTop: 12 }}>
+                    <ShieldCheck size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                    Every answer here is re-validated against the field's own type/options before it reaches this page —
+                    it also pre-fills Clinical Assessment, but a physician must confirm each value there before it counts.
+                  </div>
+                </>
+              )}
+            </>
+          ) : mode === "imaging" ? (
             <>
               {imagingPending && (
                 <div className="mf-info-strip">
@@ -1124,7 +1259,7 @@ function AlertBanner({ tone = "clay", title, children }) {
   );
 }
 
-function PageClinicalAssessment({ conditionGroup, pathways, onChangeConditionGroup, sections, onNext, onBack }) {
+function PageClinicalAssessment({ conditionGroup, pathways, onChangeConditionGroup, sections, aiFieldValues, formFillStatus, onNext, onBack }) {
   const pathwayMeta = pathways.find((p) => p.conditionGroup === conditionGroup);
 
   // The form itself comes from the backend (GET /pathways/{id}) rather than
@@ -1180,7 +1315,9 @@ function PageClinicalAssessment({ conditionGroup, pathways, onChangeConditionGro
         <p className="mf-tiny-note">Loading clinical assessment form…</p>
       ) : (
         <DynamicClinicalAssessmentForm key={definition.pathway.id} conditionGroup={conditionGroup}
-          definition={definition} sections={sections} onNext={onNext} onBack={onBack} />
+          definition={definition} sections={sections}
+          aiFieldValues={aiFieldValues} formFillStatus={formFillStatus}
+          onNext={onNext} onBack={onBack} />
       )}
     </PageShell>
   );
@@ -1694,15 +1831,21 @@ function toneForSeverity(severity) {
   return severity === "moderate" ? "amber" : "clay";
 }
 
-function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, onNext, onBack }) {
+function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, aiFieldValues, formFillStatus, onNext, onBack }) {
   const sectionByCode = Object.fromEntries(definition.sections.map((s) => [s.code, s]));
 
   // Computed once per mount — this component is remounted (via `key`, the
   // pathway's DB id) every time the pathway tab changes, so there's no
-  // stale-suggestion risk.
+  // stale-suggestion risk. This client-side heuristic (clinicalAutoFill.js)
+  // is the immediate suggestion; the backend's LLM-driven pathway-form
+  // extraction (below) supersedes it field-by-field once it arrives.
   const [aiFilled, setAiFilled] = useState(() => inferClinicalFieldsFromSections(definition, sections));
   const [values, setValues] = useState(() => ({ ...aiFilled }));
+  // Fields the physician has edited by hand — the backend AI result must
+  // never overwrite these once they arrive, even if it answers the same code.
+  const touchedCodes = useRef(new Set());
   const setValue = (code, v) => {
+    touchedCodes.current.add(code);
     setValues((prev) => ({ ...prev, [code]: v }));
     setAiFilled((prev) => {
       if (!(code in prev)) return prev;
@@ -1711,8 +1854,25 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, o
       return next;
     });
   };
-  const clearAllAiSuggestions = () => { setValues({}); setAiFilled({}); };
+  const clearAllAiSuggestions = () => {
+    Object.keys(aiFilled).forEach((code) => touchedCodes.current.add(code));
+    setValues({});
+    setAiFilled({});
+  };
   const aiCount = Object.keys(aiFilled).length;
+
+  // The backend's pathway-form-extraction job answers form fields directly
+  // (validated server-side against each field's own type/options), a more
+  // reliable signal than the client-side keyword heuristic above. Merge it
+  // in additively as it arrives — it overwrites the heuristic's guess for
+  // the same field, but never a value the physician already edited.
+  useEffect(() => {
+    if (!aiFieldValues) return;
+    const untouched = Object.entries(aiFieldValues).filter(([code]) => !touchedCodes.current.has(code));
+    if (untouched.length === 0) return;
+    setValues((prev) => ({ ...prev, ...Object.fromEntries(untouched) }));
+    setAiFilled((prev) => ({ ...prev, ...Object.fromEntries(untouched) }));
+  }, [aiFieldValues]);
 
   // Step 1 — Eligibility
   const eligibilityField = sectionByCode.eligibility?.fields[0];
@@ -1783,6 +1943,9 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, o
   return (
     <div className="mf-two-col">
       <div>
+        {formFillStatus && !isTerminal(formFillStatus) && (
+          <p className="mf-tiny-note">AI is reading the note for this pathway's fields — suggestions below will update as they arrive…</p>
+        )}
         {aiCount > 0 && (
           <div className="mf-ai-banner">
             <span><Sparkles size={13} style={{ verticalAlign: -2, marginRight: 6 }} />
@@ -1820,7 +1983,7 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, o
                 <Field label="Symptoms — check all that apply">
                   {symptomFields.map((f) => (
                     <CheckField key={f.code} label={f.name}
-                      checked={Boolean(values[f.code])} ai={Boolean(aiFilled[f.code])}
+                      checked={Boolean(values[f.code])} ai={f.code in aiFilled}
                       onChange={(v) => setValue(f.code, v)} />
                   ))}
                 </Field>
@@ -1833,7 +1996,7 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, o
                 ))}
               </div>
               {genChecks.map((f) => (
-                <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={Boolean(aiFilled[f.code])}
+                <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={f.code in aiFilled}
                   onChange={(v) => setValue(f.code, v)} />
               ))}
 
@@ -1930,7 +2093,7 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, o
                 ))}
               </div>
               {examFields.filter((f) => f.field_type === "checkbox").map((f) => (
-                <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={Boolean(aiFilled[f.code])}
+                <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={f.code in aiFilled}
                   onChange={(v) => setValue(f.code, v)} />
               ))}
             </Card>
@@ -1948,7 +2111,7 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, o
               <p className="mf-section-title">Conservative / non-operative plan</p>
               <div className="mf-field-grid">
                 {checklistFields.map((f) => (
-                  <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={Boolean(aiFilled[f.code])}
+                  <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={f.code in aiFilled}
                     onChange={(v) => setValue(f.code, v)} />
                 ))}
               </div>
