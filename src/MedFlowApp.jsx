@@ -22,7 +22,7 @@ import {
   getCurrentUser, listCaseTypes, listWorkflowTemplates, createPatient, createCase,
   submitExtraction, submitPathwayFormExtraction, getAutoFill, getExtraction,
   retryExtraction, isTerminal, evaluateRules,
-  submitPathwayValidation, analyzeAttachment, listPathways, getPathwayDefinition,
+  submitPathwayValidation, analyzeAttachment, extractDocument, listPathways, getPathwayDefinition,
   getReferralRoutingCatalog, getCaseReferralRouting, submitCaseReferralRouting,
 } from "./api.js";
 import {
@@ -225,7 +225,6 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
   // Assessment overlay) and formFillResult (AI extraction page display)
   // once done.
   const [formFillJob, setFormFillJob] = useState(null);
-  const [formFillSubmitError, setFormFillSubmitError] = useState(null);
   const [aiFieldValues, setAiFieldValues] = useState(null);
   const [formFillResult, setFormFillResult] = useState(null);
 
@@ -258,7 +257,11 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
   // never a diagnosis. Only the first image-type attachment is analyzed.
   // Polled like an extraction, so it keeps progressing regardless of page.
   const [imagingJob, setImagingJob] = useState(null);
-  const [imagingSubmitError, setImagingSubmitError] = useState(null);
+
+  // AI extraction from document attachments (DOCX, PDF) — extracts structured
+  // clinical data from documents. Polled like an extraction, so it keeps
+  // progressing regardless of page.
+  const [documentJobs, setDocumentJobs] = useState([]);
 
   // Generic signals: deterministic keyword rules (fast, synchronous).
   const [deterministicSignals, setDeterministicSignals] = useState(null);
@@ -366,6 +369,17 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
         dob: patient.dob || null,
         ...(patient.sex === "male" || patient.sex === "female" ? { sex: patient.sex } : {}),
         contact: patient.phone || patient.email || null,
+      }).catch((err) => {
+        console.error('Patient creation error:', err);
+        console.error('Patient data being sent:', {
+          organization_id: user.organization_id,
+          mrn_token: patient.mrn || `MRN-${Date.now()}`,
+          name: `${patient.firstName} ${patient.lastName}`.trim(),
+          dob: patient.dob || null,
+          sex: patient.sex === "male" || patient.sex === "female" ? patient.sex : undefined,
+          contact: patient.phone || patient.email || null,
+        });
+        throw err;
       });
 
       const newCase = await createCase({
@@ -399,17 +413,49 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
         // directly from the note — feeds Clinical Assessment's AI-suggested
         // values (see aiFieldValues below), in parallel with the grounded
         // extraction above.
-        setFormFillSubmitError(null);
         submitPathwayFormExtraction({ note: notes, pathwayId: selectedPathwayId, caseId: newCase.id })
           .then(setFormFillJob)
-          .catch((err) => setFormFillSubmitError(err.message || "Could not start AI form-fill."));
+          .catch((err) => {
+            // Silently skip form-fill if backend doesn't support it yet
+            console.log(`Pathway form extraction not available:`, err.message);
+          });
       }
 
       const imageAttachment = newCase.attachments?.find((a) => a.mime_type?.startsWith("image/"));
       if (imageAttachment) {
         analyzeAttachment(newCase.id, imageAttachment.id)
           .then(setImagingJob)
-          .catch((err) => setImagingSubmitError(err.message || "Could not start imaging analysis."));
+          .catch((err) => {
+            // Silently skip image analysis if backend doesn't support it yet
+            console.log(`Image analysis not available:`, err.message);
+          });
+      }
+
+      // Extract clinical data from document attachments (DOCX, PDF)
+      // Only attempt if backend supports document extraction
+      const documentAttachments = newCase.attachments?.filter((a) =>
+        a.mime_type === "application/pdf" ||
+        a.mime_type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+        a.mime_type === "application/msword"
+      ) || [];
+      
+      if (documentAttachments.length > 0) {
+        const jobs = [];
+        const errors = {};
+        
+        await Promise.all(documentAttachments.map(async (attachment) => {
+          try {
+            const job = await extractDocument(newCase.id, attachment.id);
+            jobs.push({ ...job, attachmentId: attachment.id, fileName: attachment.file_name });
+          } catch (err) {
+            // Silently skip document extraction if backend doesn't support it yet
+            // The 422 error indicates the backend doesn't recognize the document_extraction type
+            console.log(`Document extraction not available for ${attachment.file_name}:`, err.message);
+          }
+        }));
+        
+        setDocumentJobs(jobs);
+        setDocumentSubmitErrors(errors);
       }
 
       showToast(files.length
@@ -482,6 +528,40 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
     return () => { cancelled = true; clearInterval(t); };
   }, [formFillJob?.id, formFillJob?.status]);
 
+  // Poll document extraction jobs until they complete
+  useEffect(() => {
+    if (documentJobs.length === 0) return undefined;
+    
+    const pendingJobs = documentJobs.filter(job => !isTerminal(job.status));
+    if (pendingJobs.length === 0) return undefined;
+    
+    let cancelled = false;
+    const t = setInterval(async () => {
+      try {
+        const updates = await Promise.all(
+          pendingJobs.map(async (job) => {
+            const updated = await getExtraction(job.id);
+            return { ...updated, attachmentId: job.attachmentId, fileName: job.fileName };
+          })
+        );
+        
+        if (!cancelled) {
+          setDocumentJobs((prev) => 
+            prev.map((job) => {
+              const updated = updates.find((u) => u.id === job.id);
+              return updated ? updated : job;
+            })
+          );
+        }
+      } catch {
+        // transient network error — the next tick retries
+      }
+    }, 2500);
+    
+    return () => { cancelled = true; clearInterval(t); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documentJobs]);
+
   // Once the form-fill job completes, overlay its answers onto the
   // selected pathway's form — {code: value}, the same shape
   // clinicalAutoFill.js's client-side heuristic produces, so
@@ -543,9 +623,9 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
             {page === "extraction" && (
               <PageExtraction extraction={extraction} setExtraction={setExtraction}
                 sections={sections} setSections={setSections}
-                imagingJob={imagingJob} imagingSubmitError={imagingSubmitError}
-                formFillJob={formFillJob} formFillSubmitError={formFillSubmitError}
-                formFillResult={formFillResult} pathwayDefinition={pathwayDefinition}
+                imagingJob={imagingJob}
+                formFillJob={formFillJob} formFillResult={formFillResult} pathwayDefinition={pathwayDefinition}
+                documentJobs={documentJobs}
                 onCompleted={handleExtractionCompleted} onNext={next} onBack={back} />
             )}
             {page === "clinical-assessment" && (
@@ -820,9 +900,9 @@ function PageIntake({ pathways, clinicalCondition, onChangePathway, notes, setNo
               onDragLeave={() => setDragOver(false)}
               onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files); }}>
               <UploadCloud size={20} color="var(--ink-soft)" />
-              <div className="mf-dropzone-title">Drop imaging or lab results here</div>
-              <div className="mf-dropzone-sub">or click to browse — PDF, JPG, PNG, WEBP up to 20MB</div>
-              <input ref={inputRef} type="file" multiple accept=".pdf,.jpg,.jpeg,.png,.webp" style={{ display: "none" }}
+              <div className="mf-dropzone-title">Drop imaging, lab results, or clinical documents here</div>
+              <div className="mf-dropzone-sub">or click to browse — PDF, DOCX, JPG, PNG, WEBP up to 20MB</div>
+              <input ref={inputRef} type="file" multiple accept=".pdf,.docx,.doc,.jpg,.jpeg,.png,.webp" style={{ display: "none" }}
                 onChange={(e) => e.target.files && addFiles(e.target.files)} />
             </div>
             {files.length > 0 && (
@@ -862,26 +942,25 @@ function PageIntake({ pathways, clinicalCondition, onChangePathway, notes, setNo
 /* ── Stage 2a: AI extraction ───────────────────────────────────────────── */
 
 function PageExtraction({
-  extraction, setExtraction, sections, setSections, imagingJob, imagingSubmitError,
-  formFillJob, formFillSubmitError, formFillResult, pathwayDefinition,
+  extraction, setExtraction, sections, setSections, imagingJob,
+  formFillJob, formFillResult, pathwayDefinition,
+  documentJobs,
   onCompleted, onNext, onBack,
 }) {
   const [showNote, setShowNote] = useState(false);
-  const [mode, setMode] = useState("extraction"); // extraction | imaging | form_fill
+  const [mode, setMode] = useState("extraction"); // extraction | imaging | form_fill | documents
   const [editing, setEditing] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [retrying, setRetrying] = useState(false);
-  const hasImaging = Boolean(imagingJob || imagingSubmitError);
+  const hasImaging = Boolean(imagingJob); // Only show tab if we have an actual job
   const imagingPending = Boolean(imagingJob && !isTerminal(imagingJob.status));
   const imagingReady = Boolean(imagingJob?.status === "completed" && imagingJob.result);
   const imagingFailed = imagingJob?.status === "failed";
-  const imagingErrorMessage = imagingSubmitError || (
-    imagingFailed
-      ? (imagingJob.error?.code === "unsupported_modality"
-        ? "The AI model currently loaded can't analyze images yet — an admin needs to switch it to a vision-capable model."
-        : (imagingJob.error?.message || "Imaging analysis failed."))
-      : null
-  );
+  const imagingErrorMessage = imagingFailed
+    ? (imagingJob.error?.code === "unsupported_modality"
+      ? "The AI model currently loaded can't analyze images yet — an admin needs to switch it to a vision-capable model."
+      : (imagingJob.error?.message || "Imaging analysis failed."))
+    : null;
 
   // Pathway-form extraction: the model's own per-field answers for the
   // selected pathway, alongside the generic grounded extraction above. See
@@ -889,13 +968,11 @@ function PageExtraction({
   // AutoFillController — formFillResult only carries {code, field_type,
   // value}, so field names/option labels are resolved from
   // pathwayDefinition (fetched once at case creation) by code.
-  const hasFormFill = Boolean(formFillJob || formFillSubmitError);
+  const hasFormFill = Boolean(formFillJob); // Only show tab if we have an actual job
   const formFillPending = Boolean(formFillJob && !isTerminal(formFillJob.status));
   const formFillReady = Boolean(formFillJob?.status === "completed" && formFillResult);
   const formFillFailed = formFillJob?.status === "failed";
-  const formFillErrorMessage = formFillSubmitError || (
-    formFillFailed ? (formFillJob.error?.message || "Pathway form extraction failed.") : null
-  );
+  const formFillErrorMessage = formFillFailed ? (formFillJob.error?.message || "Pathway form extraction failed.") : null;
   const fieldMetaByCode = {};
   (pathwayDefinition?.sections || []).forEach((s) => s.fields.forEach((f) => { fieldMetaByCode[f.code] = f; }));
   const formatFieldValue = (field, value) => {
@@ -906,6 +983,14 @@ function PageExtraction({
     }
     return value;
   };
+
+  // Document extraction: AI extraction from DOCX/PDF attachments
+  const hasDocuments = Boolean(documentJobs?.length > 0); // Only show tab if we have actual jobs
+  const documentPending = Boolean(documentJobs?.some(job => !isTerminal(job.status)));
+  const documentReady = Boolean(documentJobs?.some(job => job.status === "completed" && job.result));
+  const documentFailed = Boolean(documentJobs?.some(job => job.status === "failed"));
+  const documentResults = documentJobs?.filter(job => job.status === "completed" && job.result) || [];
+
   const live = Boolean(extraction);
   const r = extraction || AI_REQUEST;
   const pending = live && !isTerminal(r.status);
@@ -1024,11 +1109,14 @@ function PageExtraction({
 
       {!pending && !failed && !missingResult && (
         <>
-          {(hasImaging || hasFormFill) && (
+          {(hasImaging || hasFormFill || hasDocuments) && (
             <div className="mf-tabs">
               <button className={`mf-tab${mode === "extraction" ? " active" : ""}`} onClick={() => setMode("extraction")}>Extraction</button>
               {hasImaging && (
                 <button className={`mf-tab${mode === "imaging" ? " active" : ""}`} onClick={() => setMode("imaging")}>Imaging findings</button>
+              )}
+              {hasDocuments && (
+                <button className={`mf-tab${mode === "documents" ? " active" : ""}`} onClick={() => setMode("documents")}>Document extractions</button>
               )}
               {hasFormFill && (
                 <button className={`mf-tab${mode === "form_fill" ? " active" : ""}`} onClick={() => setMode("form_fill")}>Pathway form</button>
@@ -1099,29 +1187,108 @@ function PageExtraction({
                     <span className="mf-prov-pill">region <b>{imagingJob.result.body_region || "unknown"}</b></span>
                     {imagingJob.result.model_id && <span className="mf-prov-pill">model <b>{imagingJob.result.model_id}</b></span>}
                   </div>
-                  <Card>
-                    <p className="mf-section-title">Findings</p>
-                    {imagingJob.result.findings?.length ? (
-                      <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-                        {imagingJob.result.findings.map((f, i) => (
-                          <li key={i} className="mf-section-content" style={{ marginBottom: 4 }}>{f}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="mf-section-content" style={{ color: "var(--ink-soft)" }}>No findings identified.</p>
-                    )}
-                  </Card>
-                  {imagingJob.result.impression && (
+                  
+                  {/* Convert imaging findings to structured items format */}
+                  {imagingJob.result.findings?.length ? (
+                    <div className="mf-section-list">
+                      {imagingJob.result.findings.map((finding, i) => (
+                        <div className="mf-section-item" key={i}>
+                          <p className="mf-section-title">Finding {i + 1}</p>
+                          <p className="mf-section-content">{finding}</p>
+                          <span className="mf-verbatim-chip unverified">
+                            <AlertTriangle size={11} />
+                            AI-assisted interpretation — verify against actual image
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
                     <Card style={{ marginTop: 8 }}>
-                      <p className="mf-section-title">Impression</p>
-                      <p className="mf-section-content">{imagingJob.result.impression}</p>
+                      <p className="mf-section-content" style={{ color: "var(--ink-soft)" }}>
+                        No findings identified from this image.
+                      </p>
                     </Card>
                   )}
+                  
+                  {imagingJob.result.impression && (
+                    <div className="mf-section-item" style={{ marginTop: 8 }}>
+                      <p className="mf-section-title">Impression</p>
+                      <p className="mf-section-content">{imagingJob.result.impression}</p>
+                      <span className="mf-verbatim-chip unverified">
+                        <AlertTriangle size={11} />
+                        AI-assisted interpretation — verify against actual image
+                      </span>
+                    </div>
+                  )}
+                  
                   <div className="mf-info-strip" style={{ marginTop: 12 }}>
                     <ShieldCheck size={14} style={{ flexShrink: 0, marginTop: 1 }} />
                     AI-assisted description, not a diagnosis — verify against the actual image before this informs any decision.
                   </div>
                 </>
+              )}
+            </>
+          ) : mode === "documents" ? (
+            <>
+              {documentPending && (
+                <div className="mf-info-strip">
+                  <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  Extracting clinical data from uploaded documents… this can take up to a minute on CPU.
+                </div>
+              )}
+
+              {documentResults.length > 0 ? (
+                <>
+                  {documentResults.map((job) => (
+                    <div key={job.id} style={{ marginBottom: 16 }}>
+                      <div className="mf-provenance">
+                        <span className="mf-prov-pill">document <b>{job.fileName || "Unknown"}</b></span>
+                        {job.model_id && <span className="mf-prov-pill">model <b>{job.model_id}</b></span>}
+                        {job.duration_ms != null && (
+                          <span className="mf-prov-pill">{job.token_count} tokens · {(job.duration_ms / 1000).toFixed(0)}s</span>
+                        )}
+                      </div>
+                      {job.result?.items && job.result.items.length > 0 ? (
+                        <div className="mf-section-list">
+                          {job.result.items.map((item, i) => (
+                            <div className="mf-section-item" key={i}>
+                              <p className="mf-section-title">{item.label}</p>
+                              <p className="mf-section-content">{item.value}</p>
+                              <span className={`mf-verbatim-chip${item.verbatim ? "" : " unverified"}`}>
+                                {item.verbatim ? <Check size={11} /> : <AlertTriangle size={11} />}
+                                {item.source_phrase
+                                  ? <>{item.verbatim ? "verbatim" : "unverified"}: "{item.source_phrase.replace(/\s+/g, " ")}"</>
+                                  : "no matching phrase in document"}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <Card style={{ marginTop: 8 }}>
+                          <p className="mf-section-content" style={{ color: "var(--ink-soft)" }}>
+                            No clinical data extracted from this document.
+                          </p>
+                        </Card>
+                      )}
+                      {job.result?.not_stated && job.result.not_stated.length > 0 && (
+                        <Card style={{ marginTop: 8 }}>
+                          <p className="mf-section-title">Not stated in this document</p>
+                          <p className="mf-section-content" style={{ color: "var(--ink-soft)" }}>{job.result.not_stated.join(" · ")}</p>
+                        </Card>
+                      )}
+                    </div>
+                  ))}
+                  <div className="mf-info-strip" style={{ marginTop: 12 }}>
+                    <ShieldCheck size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                    Document extraction provides additional clinical context — verify accuracy before integrating with the main extraction.
+                  </div>
+                </>
+              ) : (
+                <Card style={{ marginTop: 8 }}>
+                  <p className="mf-section-content" style={{ color: "var(--ink-soft)" }}>
+                    No document extractions completed yet.
+                  </p>
+                </Card>
               )}
             </>
           ) : editing ? (

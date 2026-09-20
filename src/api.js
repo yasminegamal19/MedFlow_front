@@ -215,6 +215,25 @@ export function analyzeAttachment(caseId, attachmentId) {
     .then((b) => b.data);
 }
 
+/**
+ * Queues an AI extraction from an already-uploaded document attachment
+ * (e.g. DOCX, PDF) — extracts structured clinical data from the document.
+ * Uses the same endpoint pattern as analyzeAttachment but for document extraction.
+ * Poll the returned record with getExtraction()/isTerminal(), same as an
+ * extraction.
+ *
+ * @returns {Promise<{id: string, status: string}>} the queued AI request
+ */
+export function extractDocument(caseId, attachmentId) {
+  return fetch(`${BASE}/cases/${caseId}/attachments/${attachmentId}/analyze`, {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ type: 'document_extraction' }),
+  })
+    .then(parse)
+    .then((b) => b.data);
+}
+
 /* ── Auth ───────────────────────────────────────────────────────────────── */
 
 /** @returns {Promise<{user: object, token: string}>} */
