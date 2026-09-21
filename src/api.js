@@ -301,6 +301,27 @@ export function getPathwayDefinition(pathwayId) {
     .then((b) => b.data);
 }
 
+/** {section_code: enabled} for all 8 form sections — a section with no
+ * override defaults to enabled. Controls whether findFormDefinition()
+ * reports an ai_mapping at all for that section's fields on this pathway. */
+export function getPathwayAiSettings(pathwayId) {
+  return fetch(`${BASE}/pathways/${pathwayId}/ai-settings`, { headers: headers() })
+    .then(parse)
+    .then((b) => b.data);
+}
+
+/** Toggles one section's AI-fill setting for this pathway; returns the full
+ * updated {section_code: enabled} map. */
+export function updatePathwayAiSettings(pathwayId, sectionCode, enabled) {
+  return fetch(`${BASE}/pathways/${pathwayId}/ai-settings`, {
+    method: "PATCH",
+    headers: headers({ "content-type": "application/json" }),
+    body: JSON.stringify({ section_code: sectionCode, enabled }),
+  })
+    .then(parse)
+    .then((b) => b.data);
+}
+
 /** The full Alberta referral-pathway catalog (entry doors, program
  * contacts, clinical-pathway names, emergency/urgent indications, and
  * every reason-for-referral row) — read-only, seeded from both provincial

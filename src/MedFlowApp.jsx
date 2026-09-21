@@ -1378,13 +1378,14 @@ function PillGroup({ label, value, onChange, options, aiValue }) {
   );
 }
 
-function CheckField({ label, hint, checked, onChange, danger, ai }) {
+function CheckField({ label, hint, checked, onChange, danger, ai, after }) {
   return (
     <label className={`mf-attest-row${danger ? " gap" : ""}`}>
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
       <span>
         {label}
         {ai && <AiBadge />}
+        {after}
         {hint && <span style={{ display: "block", fontSize: 11.5, color: "var(--ink-soft)" }}>{hint}</span>}
       </span>
     </label>
@@ -2009,23 +2010,46 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, a
     setAiFilled({});
   };
   const aiCount = Object.keys(aiFilled).length;
+  // True once the AI has had its pass at a field (client heuristic and/or
+  // the backend pathway-form job) and came back with nothing — distinct
+  // from a field that was never AI-fillable at all (no ai_mapping) or one
+  // the physician has since answered directly.
+  const notAiAddressed = (field) =>
+    Boolean(field.ai_mapping) && !(field.code in aiFilled) && !touchedCodes.current.has(field.code);
+  const NotAddressedHint = ({ field }) =>
+    notAiAddressed(field)
+      ? <span className="mf-tiny-note" style={{ marginLeft: 8, fontStyle: "italic" }}>not addressed in note</span>
+      : null;
 
   // The backend's pathway-form-extraction job answers form fields directly
   // (validated server-side against each field's own type/options), a more
   // reliable signal than the client-side keyword heuristic above. Merge it
   // in additively as it arrives — it overwrites the heuristic's guess for
-  // the same field, but never a value the physician already edited.
+  // the same field, but never a value the physician already edited, and
+  // never flips an explicit client-side denial (e.g. "no locking, no
+  // giving way" -> false) to true: a checkbox `true` from the backend
+  // carries no source_phrase grounding check (only text/number fields get
+  // one — see ExtractionService.extract_pathway_form), so it's weaker
+  // evidence than a textually-grounded negation match. The physician can
+  // still check it themselves.
   useEffect(() => {
     if (!aiFieldValues) return;
-    const untouched = Object.entries(aiFieldValues).filter(([code]) => !touchedCodes.current.has(code));
+    const untouched = Object.entries(aiFieldValues).filter(([code, incoming]) => {
+      if (touchedCodes.current.has(code)) return false;
+      if (aiFilled[code] === false && incoming === true) return false;
+      return true;
+    });
     if (untouched.length === 0) return;
     setValues((prev) => ({ ...prev, ...Object.fromEntries(untouched) }));
     setAiFilled((prev) => ({ ...prev, ...Object.fromEntries(untouched) }));
   }, [aiFieldValues]);
 
-  // Step 1 — Eligibility
+  // Step 1 — Eligibility: defaults to true (assumed eligible unless told
+  // otherwise) same as before this was ever AI-fillable — keyword_bag can
+  // only ever assert `true`, never contradict it, so wiring this to
+  // values/aiFilled mainly adds the AI badge when the note does support it.
   const eligibilityField = sectionByCode.eligibility?.fields[0];
-  const [eligible, setEligible] = useState(true);
+  const eligible = eligibilityField ? (values[eligibilityField.code] ?? true) : true;
 
   // Step 2 — History & details: pathway-specific fields plus the shared
   // triage-relevant (GEN_*) fields that used to be asked a second time on
@@ -2039,7 +2063,11 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, a
   const genSelects = historyFields.filter((f) => f.code.startsWith("GEN_") && f.field_type === "select");
   const genChecks = historyFields.filter((f) => f.code.startsWith("GEN_") && f.field_type === "checkbox");
 
-  // Step 3 — Red-flag screening: never auto-filled. Checking any item here
+  // Step 3 — Red-flag screening: the AI may now suggest a red flag too
+  // (subject to this pathway's "red_flags" AI-fill toggle — see the
+  // dashboard's Clinical pathways tab), but only ever a confirmed `true`
+  // or an explicit denial-derived `false`, never a guess — the physician
+  // still confirms every one before continuing. Checking any item here
   // both shows that flag's own recommended action and is what makes the
   // deterministic engine's urgency "Urgent".
   const [redFlagsDone, setRedFlagsDone] = useState(false);
@@ -2107,7 +2135,8 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, a
         <Card>
           {eligibilityField && (
             <>
-              <CheckField label={eligibilityField.name} checked={eligible} onChange={setEligible} />
+              <CheckField label={eligibilityField.name} checked={eligible} ai={eligibilityField.code in aiFilled}
+                onChange={(v) => setValue(eligibilityField.code, v)} />
               {!eligible && eligibilityField.display_config?.warning && (
                 <div className="mf-info-strip" style={{ marginTop: 10 }}>
                   <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
@@ -2132,7 +2161,7 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, a
                 <Field label="Symptoms — check all that apply">
                   {symptomFields.map((f) => (
                     <CheckField key={f.code} label={f.name}
-                      checked={Boolean(values[f.code])} ai={f.code in aiFilled}
+                      checked={Boolean(values[f.code])} ai={f.code in aiFilled} after={<NotAddressedHint field={f} />}
                       onChange={(v) => setValue(f.code, v)} />
                   ))}
                 </Field>
@@ -2146,7 +2175,7 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, a
               </div>
               {genChecks.map((f) => (
                 <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={f.code in aiFilled}
-                  onChange={(v) => setValue(f.code, v)} />
+                  after={<NotAddressedHint field={f} />} onChange={(v) => setValue(f.code, v)} />
               ))}
 
               {comorbField && (
@@ -2174,13 +2203,15 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, a
               </p>
               <div className="mf-info-strip" style={{ margin: "0 0 12px", background: "transparent", border: "1px dashed #E3B8B4", color: "var(--clay)" }}>
                 <Info size={13} style={{ flexShrink: 0, marginTop: 1 }} />
-                Never auto-filled from the AI extraction — check these only from your own reading of the note and exam.
+                A checked box marked "AI" is only ever a confirmed match or an explicit denial in the note — never a
+                guess. Confirm every one against your own reading of the note and exam before continuing.
               </div>
               <div className="mf-field-grid">
                 {redFlagFields.map((f) => (
                   <div key={f.code} style={{ background: "var(--paper)", border: "1px solid var(--line)", borderRadius: "var(--r-sm)", padding: "10px 12px" }}>
                     <CheckField label={f.name} danger hint={f.red_flag_category?.description}
-                      checked={Boolean(values[f.code])} onChange={(v) => setValue(f.code, v)} />
+                      checked={Boolean(values[f.code])} ai={f.code in aiFilled} after={<NotAddressedHint field={f} />}
+                      onChange={(v) => setValue(f.code, v)} />
                   </div>
                 ))}
               </div>
@@ -2208,9 +2239,11 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, a
                   <button type="button" key={o.value} className={`mf-channel-btn${anatomicalValue === o.value ? " active" : ""}`}
                     onClick={() => setValue(anatomicalField.code, o.value)} style={{ flex: "1 1 140px" }}>
                     {o.label}
+                    {aiFilled[anatomicalField.code] === o.value && <AiBadge />}
                   </button>
                 ))}
               </div>
+              <NotAddressedHint field={anatomicalField} />
               {anatomicalDetail && (
                 <div style={{ marginTop: 14 }}>
                   <p className="mf-section-title">
@@ -2243,7 +2276,7 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, a
               </div>
               {examFields.filter((f) => f.field_type === "checkbox").map((f) => (
                 <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={f.code in aiFilled}
-                  onChange={(v) => setValue(f.code, v)} />
+                  after={<NotAddressedHint field={f} />} onChange={(v) => setValue(f.code, v)} />
               ))}
             </Card>
 
@@ -2261,7 +2294,7 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, a
               <div className="mf-field-grid">
                 {checklistFields.map((f) => (
                   <CheckField key={f.code} label={f.name} checked={Boolean(values[f.code])} ai={f.code in aiFilled}
-                    onChange={(v) => setValue(f.code, v)} />
+                    after={<NotAddressedHint field={f} />} onChange={(v) => setValue(f.code, v)} />
                 ))}
               </div>
 
@@ -2270,7 +2303,8 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, a
                   <p className="mf-section-title" style={{ marginTop: 14 }}>Injection considerations</p>
                   {injectionFields.map((f) => (
                     <div key={f.code}>
-                      <CheckField label={f.name} checked={Boolean(values[f.code])} onChange={(v) => setValue(f.code, v)} />
+                      <CheckField label={f.name} checked={Boolean(values[f.code])} ai={f.code in aiFilled}
+                        after={<NotAddressedHint field={f} />} onChange={(v) => setValue(f.code, v)} />
                       {f.display_config?.warning && values[f.code] && (
                         <div className="mf-verdict mf-verdict-gap" style={{ background: "var(--clay-soft)", color: "var(--clay)", marginTop: 4, marginBottom: 8 }}>
                           <AlertTriangle size={14} /> {f.display_config.warning}
@@ -2317,7 +2351,9 @@ function DynamicClinicalAssessmentForm({ conditionGroup, definition, sections, a
               {atypicalCheckbox && (
                 <CheckField label={atypicalCheckbox.name}
                   hint="Overlaps with neuropathy, cervical radiculopathy, RA, hip OA, piriformis, etc."
-                  checked={Boolean(values[atypicalCheckbox.code])} onChange={(v) => setValue(atypicalCheckbox.code, v)} />
+                  checked={Boolean(values[atypicalCheckbox.code])} ai={atypicalCheckbox.code in aiFilled}
+                  after={<NotAddressedHint field={atypicalCheckbox} />}
+                  onChange={(v) => setValue(atypicalCheckbox.code, v)} />
               )}
               {atypicalCheckbox && values[atypicalCheckbox.code] && atypicalText && (
                 <Field label={atypicalText.name}>
