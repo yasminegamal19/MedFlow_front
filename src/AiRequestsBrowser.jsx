@@ -27,6 +27,19 @@ export function StatusPill({ status }) {
   return <span className={`mf-status-pill-sm mf-status-pill-${STATUS_TONE[status] || "neutral"}`}>{status}</span>;
 }
 
+/** Where the request's (never-exposed) input text actually came from — see
+ * AiRequestResource::toArray()'s `source`/`source_document` fields on the
+ * backend. A document means it was OCR'd (CaseController::store()'s
+ * referral_document handling); note means it was typed at Case Intake. */
+export function SourceLabel({ request }) {
+  if (request.source !== "document") return <span className="mf-tiny-note">Typed note</span>;
+  return (
+    <span className="mf-tiny-note" title={request.source_document?.filename}>
+      Document{request.source_document?.filename ? `: ${request.source_document.filename}` : ""}
+    </span>
+  );
+}
+
 export function formatDuration(ms) {
   if (ms == null) return "—";
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
@@ -87,6 +100,7 @@ export default function AiRequestsBrowser() {
               <tr>
                 <th>Type</th>
                 <th>Status</th>
+                <th>Source</th>
                 <th>Case</th>
                 <th>Model</th>
                 <th>Duration</th>
@@ -99,6 +113,7 @@ export default function AiRequestsBrowser() {
                   style={{ cursor: "pointer" }}>
                   <td>{TYPE_LABELS[r.type] || r.type}</td>
                   <td><StatusPill status={r.status} /></td>
+                  <td><SourceLabel request={r} /></td>
                   <td>{r.case_id ? r.case_id.slice(0, 8) + "…" : "—"}</td>
                   <td>{r.model_id || "—"}</td>
                   <td>{formatDuration(r.duration_ms)}</td>

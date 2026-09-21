@@ -1,8 +1,46 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Check, LogOut } from "lucide-react";
+import { AlertTriangle, Check, FileText, LogOut, PenLine } from "lucide-react";
 import { GlobalStyle } from "./styles.jsx";
 import { getExtraction } from "./api.js";
 import { TYPE_LABELS, StatusPill, formatDuration, formatDate } from "./AiRequestsBrowser.jsx";
+
+/** Full provenance: which of the case's documents (if any) this result's
+ * text actually came from, versus the ones just along for the ride. Falls
+ * back to the plain note/document label when case_documents wasn't loaded
+ * (e.g. an older cached response). */
+function SourceSection({ request }) {
+  const docs = request.case_documents;
+
+  return (
+    <div className="mf-info-strip" style={{ marginBottom: 16, flexDirection: "column", alignItems: "stretch", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {request.source === "document" ? <FileText size={14} /> : <PenLine size={14} />}
+        <span>
+          {request.source === "document"
+            ? <>Sourced from an uploaded document{request.source_document?.filename ? <> — <b>{request.source_document.filename}</b></> : ""}, OCR'd server-side.</>
+            : "Sourced from a typed clinical note (Case Intake)."}
+        </span>
+      </div>
+      {Array.isArray(docs) && docs.length > 0 && (
+        <div>
+          <p className="mf-tiny-note" style={{ margin: "4px 0" }}>
+            {docs.length} document{docs.length > 1 ? "s" : ""} on this case:
+          </p>
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {docs.map((d) => (
+              <li key={d.id} style={{ fontSize: 13 }}>
+                {d.filename}{d.version > 1 ? ` (v${d.version})` : ""}
+                {d.is_source
+                  ? <span className="mf-prov-pill" style={{ marginLeft: 6 }}>used for this result</span>
+                  : <span className="mf-tiny-note" style={{ marginLeft: 6 }}>not used for this result</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function formatFieldValue(field, value) {
   if (value === true) return "Yes";
@@ -205,6 +243,8 @@ export default function AiRequestDetailPage({ id, onLogout, onBack }) {
               <span className="mf-prov-pill">queued {formatDate(request.created_at)}</span>
               {request.completed_at && <span className="mf-prov-pill">completed {formatDate(request.completed_at)}</span>}
             </div>
+
+            <SourceSection request={request} />
 
             {request.status === "failed" ? (
               <div className="db-empty">

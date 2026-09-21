@@ -53,7 +53,7 @@ async function parse(res) {
  *
  * @returns {Promise<{id: string, status: string}>} the queued AI request
  */
-export function submitExtraction({ note, pathway, caseId }) {
+export function submitExtraction({ note, pathway, caseId, sourceDocumentId }) {
   return fetch(`${BASE}/v1/ai/extractions`, {
     method: "POST",
     headers: headers({ "content-type": "application/json" }),
@@ -62,6 +62,7 @@ export function submitExtraction({ note, pathway, caseId }) {
       type: "grounded_extraction",
       ...(pathway ? { pathway } : {}),
       ...(caseId ? { case_id: caseId } : {}),
+      ...(sourceDocumentId ? { source_document_id: sourceDocumentId } : {}),
     }),
   })
     .then(parse)
@@ -140,7 +141,7 @@ export function evaluateRules({ sections, pathway }) {
  *
  * @returns {Promise<{id: string, status: string}>} the queued AI request
  */
-export function submitPathwayFormExtraction({ note, pathwayId, caseId }) {
+export function submitPathwayFormExtraction({ note, pathwayId, caseId, sourceDocumentId }) {
   return fetch(`${BASE}/v1/ai/extractions`, {
     method: "POST",
     headers: headers({ "content-type": "application/json" }),
@@ -149,6 +150,7 @@ export function submitPathwayFormExtraction({ note, pathwayId, caseId }) {
       type: "pathway_form_extraction",
       pathway_id: pathwayId,
       ...(caseId ? { case_id: caseId } : {}),
+      ...(sourceDocumentId ? { source_document_id: sourceDocumentId } : {}),
     }),
   })
     .then(parse)
@@ -365,14 +367,19 @@ export function createPatient(data) {
  * @param {object} data - case fields (organization_id, patient_id, ...)
  * @param {File[]} [files] - supporting documents (e.g. an X-ray) to attach.
  *   Switches the request to multipart/form-data; omit for the plain JSON path.
+ * @param {File|null} [referralDocument] - a document to OCR + grounded-extract
+ *   server-side (CaseController::store()'s `referral_document` field) instead
+ *   of just storing it. Used when there's no typed note to extract from — the
+ *   response's `ai_analysis` carries the AI request queued from it.
  */
-export function createCase(data, files = []) {
-  if (files.length > 0) {
+export function createCase(data, files = [], referralDocument = null) {
+  if (files.length > 0 || referralDocument) {
     const body = new FormData();
     Object.entries(data).forEach(([k, v]) => {
       if (v != null) body.append(k, v);
     });
     files.forEach((f) => body.append("attachments[]", f));
+    if (referralDocument) body.append("referral_document", referralDocument);
     return fetch(`${BASE}/cases`, {
       method: "POST",
       headers: headers(), // no content-type — the browser sets the multipart boundary
@@ -387,6 +394,15 @@ export function createCase(data, files = []) {
     headers: headers({ "content-type": "application/json" }),
     body: JSON.stringify(data),
   })
+    .then(parse)
+    .then((b) => b.data);
+}
+
+/** Full case record (patient, pathways, attachments) — used to resume the
+ * wizard from a `case` id in the URL after a direct link or page reload,
+ * since in-memory wizard state doesn't otherwise survive one. */
+export function getCase(id) {
+  return fetch(`${BASE}/cases/${id}`, { headers: headers() })
     .then(parse)
     .then((b) => b.data);
 }
