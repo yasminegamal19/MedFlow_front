@@ -24,6 +24,7 @@ import {
   retryExtraction, isTerminal, evaluateRules,
   submitPathwayValidation, analyzeAttachment, extractDocument, listPathways, getPathwayDefinition,
   getReferralRoutingCatalog, getCaseReferralRouting, submitCaseReferralRouting,
+  headers, BASE,
 } from "./api.js";
 import {
   ORG, CASE_ID, GUIDING_PRINCIPLE, PATIENT_DEFAULTS, SAMPLE_NOTE,
@@ -258,10 +259,10 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
   // Polled like an extraction, so it keeps progressing regardless of page.
   const [imagingJob, setImagingJob] = useState(null);
 
-  // AI extraction from document attachments (DOCX, PDF) — extracts structured
-  // clinical data from documents. Polled like an extraction, so it keeps
-  // progressing regardless of page.
-  const [documentJobs, setDocumentJobs] = useState([]);
+  // Combined extracted text from clinical notes and documents
+  const [combinedExtractedText, setCombinedExtractedText] = useState(null);
+  // Text extracted specifically from uploaded documents (PDF/DOCX) — shown in the "Document extraction" tab
+  const [extractedDocText, setExtractedDocText] = useState(null);
 
   // Generic signals: deterministic keyword rules (fast, synchronous).
   const [deterministicSignals, setDeterministicSignals] = useState(null);
@@ -382,6 +383,13 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
         throw err;
       });
 
+      const hasNotes = Boolean(notes && notes.trim().length >= 10);
+      const hasFiles = Boolean(files && files.length > 0);
+
+      if (!hasNotes && !hasFiles) {
+        throw new Error("Please provide either a clinical note (at least 10 characters) or upload at least one supporting document.");
+      }
+
       const newCase = await createCase({
         organization_id: user.organization_id,
         patient_id: newPatient.id,
@@ -390,16 +398,89 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
         workflow_template_id: template.id,
         ...(selectedPathwayId ? { pathway_id: selectedPathwayId } : {}),
         status: "created",
-        raw_notes: notes,
+        raw_notes: notes || null,
+        documents: hasFiles ? {
+          extracted_text: null,
+          file_count: files.length,
+        } : null,
       }, files.map((f) => f.file));
       setCaseId(newCase.id);
 
-      const queued = await submitExtraction({ note: notes, pathway, caseId: newCase.id });
+      // If document attachments were uploaded, extract text from documents (PDF / DOCX)
+      let localExtractedDocText = newCase.documents?.[0]?.extracted_text || "";
+      const docAttachments = (newCase.attachments || []).filter((a) =>
+        a.mime_type === "application/pdf" ||
+        a.mime_type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+        a.original_filename?.endsWith(".pdf") ||
+        a.original_filename?.endsWith(".docx") ||
+        a.original_filename?.endsWith(".doc")
+      );
+
+      if (!localExtractedDocText && docAttachments.length > 0) {
+        // Trigger document extraction for the document attachments.
+        // The backend processes the document synchronously (PDF/DOCX -> text)
+        // and returns the extracted_text in the same response as the AI job.
+        const docExtractions = await Promise.allSettled(
+          docAttachments.map((att) => extractDocument(newCase.id, att.id))
+        );
+        console.log("Document extraction responses:", docExtractions);
+        // Collect successfully extracted texts from the response
+        const extractedTexts = docExtractions
+          .filter((r) => r.status === "fulfilled" && r.value?.extracted_text)
+          .map((r) => r.value.extracted_text)
+          .join("\n\n");
+        if (extractedTexts) {
+          localExtractedDocText = extractedTexts;
+          console.log(`Document text extracted (${extractedTexts.length} chars)`);
+        } else {
+          console.warn("Document extraction returned no text — backend may not support extracted_text yet, or document is not text-based.", docExtractions);
+        }
+      }
+
+      // Persist extracted doc text in state so PageExtraction can show the Document extraction tab
+      if (localExtractedDocText) setExtractedDocText(localExtractedDocText);
+
+      // Three options:
+      // Option 1: Clinical note only (no documents uploaded)
+      // Option 2: Clinical note + documents uploaded -> combine both
+      // Option 3: Documents only (no clinical note) -> document text only
+      let textForExtraction = "";
+      const trimmedNotes = notes ? notes.trim() : "";
+
+      if (hasNotes && (hasFiles || localExtractedDocText)) {
+        // Option 2: Clinical note AND documents
+        textForExtraction = localExtractedDocText
+          ? `CLINICAL NOTES:\n${trimmedNotes}\n\nDOCUMENT TEXT:\n${localExtractedDocText}`
+          : trimmedNotes;
+        setCombinedExtractedText(
+          localExtractedDocText
+            ? `CLINICAL NOTES:\n${trimmedNotes}\n\nDOCUMENT TEXT:\n${localExtractedDocText}`
+            : trimmedNotes
+        );
+      } else if (hasNotes) {
+        // Option 1: Clinical note only
+        textForExtraction = trimmedNotes;
+        setCombinedExtractedText(trimmedNotes);
+      } else {
+        // Option 3: Documents only (no clinical note)
+        // If we have extracted text use it; otherwise show a clear placeholder
+        // (not a fake [Document Analysis] string that looks like real content)
+        const docPlaceholder = files.length
+          ? `[Awaiting text extraction from: ${files.map(f => f.name).join(", ")}]`
+          : "[No clinical text available]";
+        textForExtraction = localExtractedDocText || docPlaceholder;
+        setCombinedExtractedText(localExtractedDocText || docPlaceholder);
+      }
+
+      // Submit grounded extraction
+      const queued = await submitExtraction({
+        note: textForExtraction,
+        pathway,
+        caseId: newCase.id,
+      });
       setExtraction(queued);
 
-      // Fetch the selected pathway's field definition — the JSON meant to
-      // later tell an AI step which Clinical Assessment fields exist and
-      // how to fill them. Nothing consumes it yet; held for that next step.
+      // Fetch the selected pathway's field definition
       if (selectedPathwayId) {
         getPathwayDefinition(selectedPathwayId)
           .then((def) => {
@@ -409,14 +490,14 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
           })
           .catch(() => {});
 
-        // Also ask the model to answer this pathway's own form fields
-        // directly from the note — feeds Clinical Assessment's AI-suggested
-        // values (see aiFieldValues below), in parallel with the grounded
-        // extraction above.
-        submitPathwayFormExtraction({ note: notes, pathwayId: selectedPathwayId, caseId: newCase.id })
+        // Pathway form extraction using the same combined text
+        submitPathwayFormExtraction({
+          note: textForExtraction,
+          pathwayId: selectedPathwayId,
+          caseId: newCase.id,
+        })
           .then(setFormFillJob)
           .catch((err) => {
-            // Silently skip form-fill if backend doesn't support it yet
             console.log(`Pathway form extraction not available:`, err.message);
           });
       }
@@ -426,36 +507,8 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
         analyzeAttachment(newCase.id, imageAttachment.id)
           .then(setImagingJob)
           .catch((err) => {
-            // Silently skip image analysis if backend doesn't support it yet
             console.log(`Image analysis not available:`, err.message);
           });
-      }
-
-      // Extract clinical data from document attachments (DOCX, PDF)
-      // Only attempt if backend supports document extraction
-      const documentAttachments = newCase.attachments?.filter((a) =>
-        a.mime_type === "application/pdf" ||
-        a.mime_type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-        a.mime_type === "application/msword"
-      ) || [];
-      
-      if (documentAttachments.length > 0) {
-        const jobs = [];
-        const errors = {};
-        
-        await Promise.all(documentAttachments.map(async (attachment) => {
-          try {
-            const job = await extractDocument(newCase.id, attachment.id);
-            jobs.push({ ...job, attachmentId: attachment.id, fileName: attachment.file_name });
-          } catch (err) {
-            // Silently skip document extraction if backend doesn't support it yet
-            // The 422 error indicates the backend doesn't recognize the document_extraction type
-            console.log(`Document extraction not available for ${attachment.file_name}:`, err.message);
-          }
-        }));
-        
-        setDocumentJobs(jobs);
-        setDocumentSubmitErrors(errors);
       }
 
       showToast(files.length
@@ -528,40 +581,6 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
     return () => { cancelled = true; clearInterval(t); };
   }, [formFillJob?.id, formFillJob?.status]);
 
-  // Poll document extraction jobs until they complete
-  useEffect(() => {
-    if (documentJobs.length === 0) return undefined;
-    
-    const pendingJobs = documentJobs.filter(job => !isTerminal(job.status));
-    if (pendingJobs.length === 0) return undefined;
-    
-    let cancelled = false;
-    const t = setInterval(async () => {
-      try {
-        const updates = await Promise.all(
-          pendingJobs.map(async (job) => {
-            const updated = await getExtraction(job.id);
-            return { ...updated, attachmentId: job.attachmentId, fileName: job.fileName };
-          })
-        );
-        
-        if (!cancelled) {
-          setDocumentJobs((prev) => 
-            prev.map((job) => {
-              const updated = updates.find((u) => u.id === job.id);
-              return updated ? updated : job;
-            })
-          );
-        }
-      } catch {
-        // transient network error — the next tick retries
-      }
-    }, 2500);
-    
-    return () => { cancelled = true; clearInterval(t); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documentJobs]);
-
   // Once the form-fill job completes, overlay its answers onto the
   // selected pathway's form — {code: value}, the same shape
   // clinicalAutoFill.js's client-side heuristic produces, so
@@ -625,7 +644,8 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
                 sections={sections} setSections={setSections}
                 imagingJob={imagingJob}
                 formFillJob={formFillJob} formFillResult={formFillResult} pathwayDefinition={pathwayDefinition}
-                documentJobs={documentJobs}
+                combinedExtractedText={combinedExtractedText}
+                extractedDocText={extractedDocText}
                 onCompleted={handleExtractionCompleted} onNext={next} onBack={back} />
             )}
             {page === "clinical-assessment" && (
@@ -847,8 +867,7 @@ function PageIntake({ pathways, clinicalCondition, onChangePathway, notes, setNo
   const [dragOver, setDragOver] = useState(false);
   const [touched, setTouched] = useState(false);
   const inputRef = useRef(null);
-  const notesValid = notes.trim().length >= 10;
-  const canSubmit = notesValid && clinicalCondition && !submitting;
+  const canSubmit = clinicalCondition && !submitting;
 
   // Sourced from the database (GET /pathways) once loaded; falls back to
   // the static condition-group list (no real pathway_id yet) so intake
@@ -890,7 +909,6 @@ function PageIntake({ pathways, clinicalCondition, onChangePathway, notes, setNo
             <textarea className="mf-textarea"
               placeholder="Paste the visit note: chief complaint, history, exam findings, prior treatment, imaging…"
               value={notes} onChange={(e) => setNotes(e.target.value)} />
-            {touched && !notesValid && <p className="mf-error">Add a visit note of at least 10 characters.</p>}
           </Field>
           <Field label="Supporting documents">
             <div className={`mf-dropzone${dragOver ? " drag" : ""}`} role="button" tabIndex={0}
@@ -944,11 +962,11 @@ function PageIntake({ pathways, clinicalCondition, onChangePathway, notes, setNo
 function PageExtraction({
   extraction, setExtraction, sections, setSections, imagingJob,
   formFillJob, formFillResult, pathwayDefinition,
-  documentJobs,
+  combinedExtractedText, extractedDocText,
   onCompleted, onNext, onBack,
 }) {
   const [showNote, setShowNote] = useState(false);
-  const [mode, setMode] = useState("extraction"); // extraction | imaging | form_fill | documents
+  const [mode, setMode] = useState("extraction"); // extraction | imaging | form_fill | doc_extraction
   const [editing, setEditing] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [retrying, setRetrying] = useState(false);
@@ -983,13 +1001,6 @@ function PageExtraction({
     }
     return value;
   };
-
-  // Document extraction: AI extraction from DOCX/PDF attachments
-  const hasDocuments = Boolean(documentJobs?.length > 0); // Only show tab if we have actual jobs
-  const documentPending = Boolean(documentJobs?.some(job => !isTerminal(job.status)));
-  const documentReady = Boolean(documentJobs?.some(job => job.status === "completed" && job.result));
-  const documentFailed = Boolean(documentJobs?.some(job => job.status === "failed"));
-  const documentResults = documentJobs?.filter(job => job.status === "completed" && job.result) || [];
 
   const live = Boolean(extraction);
   const r = extraction || AI_REQUEST;
@@ -1063,8 +1074,8 @@ function PageExtraction({
       }>
       {showNote && (
         <div className="mf-note-box">
-          <p className="mf-note-box-title">Original visit note, as pasted at intake</p>
-          <pre className="mf-mono-block">{SAMPLE_NOTE}</pre>
+          <p className="mf-note-box-title">Combined clinical text (notes + documents)</p>
+          <pre className="mf-mono-block">{combinedExtractedText || SAMPLE_NOTE}</pre>
         </div>
       )}
 
@@ -1088,10 +1099,20 @@ function PageExtraction({
       {failed && (
         <div className="mf-info-strip">
           <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-          {r.error?.message || "Extraction failed."}
-          <button className="mf-inline-link" onClick={handleRetry} disabled={retrying} style={{ marginLeft: 8 }}>
-            {retrying ? "Retrying…" : "Retry"}
-          </button>
+          {r.error?.code === 'empty_not' 
+            ? "The clinical note appears to be empty or too short. Please ensure you've entered a detailed clinical note before extraction."
+            : r.error?.code === 'ai_reject' || r.error?.code === 'ai_rejected'
+            ? "The AI service rejected the extraction request. This may be due to content policy, service configuration, or rate limiting. Please contact your system administrator to check the AI service configuration."
+            : (r.error?.message || "The AI request could not be completed. Please try again or contact support if the issue persists.")
+          }
+          {r.error?.code && r.error?.code !== 'empty_not' && r.error?.code !== 'ai_reject' && r.error?.code !== 'ai_rejected' && (
+            <span style={{ marginLeft: 8, fontSize: 11, color: "var(--ink-soft)" }}>Error code: {r.error.code}</span>
+          )}
+          {r.error?.code !== 'ai_reject' && r.error?.code !== 'ai_rejected' && (
+            <button className="mf-inline-link" onClick={handleRetry} disabled={retrying} style={{ marginLeft: 8 }}>
+              {retrying ? "Retrying…" : "Retry"}
+            </button>
+          )}
         </div>
       )}
 
@@ -1109,14 +1130,14 @@ function PageExtraction({
 
       {!pending && !failed && !missingResult && (
         <>
-          {(hasImaging || hasFormFill || hasDocuments) && (
+          {(hasImaging || hasFormFill || extractedDocText) && (
             <div className="mf-tabs">
               <button className={`mf-tab${mode === "extraction" ? " active" : ""}`} onClick={() => setMode("extraction")}>Extraction</button>
+              {extractedDocText && (
+                <button className={`mf-tab${mode === "doc_extraction" ? " active" : ""}`} onClick={() => setMode("doc_extraction")}>Document extraction</button>
+              )}
               {hasImaging && (
                 <button className={`mf-tab${mode === "imaging" ? " active" : ""}`} onClick={() => setMode("imaging")}>Imaging findings</button>
-              )}
-              {hasDocuments && (
-                <button className={`mf-tab${mode === "documents" ? " active" : ""}`} onClick={() => setMode("documents")}>Document extractions</button>
               )}
               {hasFormFill && (
                 <button className={`mf-tab${mode === "form_fill" ? " active" : ""}`} onClick={() => setMode("form_fill")}>Pathway form</button>
@@ -1142,26 +1163,37 @@ function PageExtraction({
                 <>
                   <div className="mf-provenance">
                     <span className="mf-prov-pill">pathway <b>{formFillResult.pathway?.name}</b></span>
+                    {(() => {
+                      const allFields = formFillResult.sections.flatMap((s) => s.fields);
+                      const answeredCount = allFields.filter((f) => f.value !== null && f.value !== undefined).length;
+                      return (
+                        <span className="mf-prov-pill"><b>{answeredCount}</b> of {allFields.length} fields answered by AI</span>
+                      );
+                    })()}
                   </div>
-                  {formFillResult.sections.map((s) => {
-                    const answered = s.fields.filter((f) => f.value !== null && f.value !== undefined);
-                    if (answered.length === 0) return null;
-                    return (
-                      <Card key={s.code} style={{ marginTop: 8 }}>
-                        <p className="mf-section-title">{s.name}</p>
-                        {answered.map((f) => (
-                          <div key={f.code} className="mf-summary-row">
+                  {formFillResult.sections.map((s) => (
+                    <Card key={s.code} style={{ marginTop: 8 }}>
+                      <p className="mf-section-title">{s.name}</p>
+                      {s.fields.map((f) => {
+                        const answered = f.value !== null && f.value !== undefined;
+                        return (
+                          <div key={f.code} className="mf-summary-row" style={{ opacity: answered ? 1 : 0.6 }}>
                             <span className="mf-summary-key">{fieldMetaByCode[f.code]?.name || f.code}</span>
-                            <span className="mf-summary-val">{formatFieldValue(f, f.value)}</span>
+                            {answered ? (
+                              <span className="mf-summary-val">{formatFieldValue(f, f.value)}</span>
+                            ) : (
+                              <span className="mf-verbatim-chip unverified" style={{ fontSize: 11 }}>Not stated</span>
+                            )}
                           </div>
-                        ))}
-                      </Card>
-                    );
-                  })}
+                        );
+                      })}
+                    </Card>
+                  ))}
                   <div className="mf-info-strip" style={{ marginTop: 12 }}>
                     <ShieldCheck size={14} style={{ flexShrink: 0, marginTop: 1 }} />
                     Every answer here is re-validated against the field's own type/options before it reaches this page —
                     it also pre-fills Clinical Assessment, but a physician must confirm each value there before it counts.
+                    Fields marked "Not stated" were not found in the note.
                   </div>
                 </>
               )}
@@ -1228,68 +1260,18 @@ function PageExtraction({
                 </>
               )}
             </>
-          ) : mode === "documents" ? (
+          ) : mode === "doc_extraction" ? (
             <>
-              {documentPending && (
-                <div className="mf-info-strip">
-                  <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-                  Extracting clinical data from uploaded documents… this can take up to a minute on CPU.
-                </div>
-              )}
-
-              {documentResults.length > 0 ? (
-                <>
-                  {documentResults.map((job) => (
-                    <div key={job.id} style={{ marginBottom: 16 }}>
-                      <div className="mf-provenance">
-                        <span className="mf-prov-pill">document <b>{job.fileName || "Unknown"}</b></span>
-                        {job.model_id && <span className="mf-prov-pill">model <b>{job.model_id}</b></span>}
-                        {job.duration_ms != null && (
-                          <span className="mf-prov-pill">{job.token_count} tokens · {(job.duration_ms / 1000).toFixed(0)}s</span>
-                        )}
-                      </div>
-                      {job.result?.items && job.result.items.length > 0 ? (
-                        <div className="mf-section-list">
-                          {job.result.items.map((item, i) => (
-                            <div className="mf-section-item" key={i}>
-                              <p className="mf-section-title">{item.label}</p>
-                              <p className="mf-section-content">{item.value}</p>
-                              <span className={`mf-verbatim-chip${item.verbatim ? "" : " unverified"}`}>
-                                {item.verbatim ? <Check size={11} /> : <AlertTriangle size={11} />}
-                                {item.source_phrase
-                                  ? <>{item.verbatim ? "verbatim" : "unverified"}: "{item.source_phrase.replace(/\s+/g, " ")}"</>
-                                  : "no matching phrase in document"}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <Card style={{ marginTop: 8 }}>
-                          <p className="mf-section-content" style={{ color: "var(--ink-soft)" }}>
-                            No clinical data extracted from this document.
-                          </p>
-                        </Card>
-                      )}
-                      {job.result?.not_stated && job.result.not_stated.length > 0 && (
-                        <Card style={{ marginTop: 8 }}>
-                          <p className="mf-section-title">Not stated in this document</p>
-                          <p className="mf-section-content" style={{ color: "var(--ink-soft)" }}>{job.result.not_stated.join(" · ")}</p>
-                        </Card>
-                      )}
-                    </div>
-                  ))}
-                  <div className="mf-info-strip" style={{ marginTop: 12 }}>
-                    <ShieldCheck size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-                    Document extraction provides additional clinical context — verify accuracy before integrating with the main extraction.
-                  </div>
-                </>
-              ) : (
-                <Card style={{ marginTop: 8 }}>
-                  <p className="mf-section-content" style={{ color: "var(--ink-soft)" }}>
-                    No document extractions completed yet.
-                  </p>
-                </Card>
-              )}
+              <div className="mf-info-strip" style={{ marginTop: 0 }}>
+                <Info size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                Raw text extracted from your uploaded documents (PDF / DOCX) before it was sent to the AI. This is what the AI read from the attachments.
+              </div>
+              <div className="mf-note-box" style={{ marginTop: 8 }}>
+                <p className="mf-note-box-title">Extracted document text</p>
+                <pre className="mf-mono-block" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  {extractedDocText}
+                </pre>
+              </div>
             </>
           ) : editing ? (
             <div className="mf-fields-view">

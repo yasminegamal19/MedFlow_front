@@ -16,7 +16,7 @@
  * until status is "completed" or "failed".
  */
 
-const BASE = import.meta.env.VITE_API_BASE || "/api";
+export const BASE = import.meta.env.VITE_API_BASE || "/api";
 
 let apiToken = import.meta.env.VITE_API_TOKEN || null;
 
@@ -25,7 +25,7 @@ export function setApiToken(token) {
   apiToken = token || null;
 }
 
-function headers(extra = {}) {
+export function headers(extra = {}) {
   const h = { accept: "application/json", ...extra };
   if (apiToken) h.authorization = `Bearer ${apiToken}`;
   return h;
@@ -218,11 +218,11 @@ export function analyzeAttachment(caseId, attachmentId) {
 /**
  * Queues an AI extraction from an already-uploaded document attachment
  * (e.g. DOCX, PDF) — extracts structured clinical data from the document.
- * Uses the same endpoint pattern as analyzeAttachment but for document extraction.
- * Poll the returned record with getExtraction()/isTerminal(), same as an
- * extraction.
+ * The response includes both the AI job record AND the `extracted_text` the
+ * backend pulled from the document synchronously, so the caller can display
+ * that text immediately without waiting for the job to complete.
  *
- * @returns {Promise<{id: string, status: string}>} the queued AI request
+ * @returns {Promise<{id: string, status: string, extracted_text?: string}>}
  */
 export function extractDocument(caseId, attachmentId) {
   return fetch(`${BASE}/cases/${caseId}/attachments/${attachmentId}/analyze`, {
@@ -231,7 +231,7 @@ export function extractDocument(caseId, attachmentId) {
     body: JSON.stringify({ type: 'document_extraction' }),
   })
     .then(parse)
-    .then((b) => b.data);
+    .then((b) => b.data); // includes extracted_text for document attachments
 }
 
 /* ── Auth ───────────────────────────────────────────────────────────────── */
