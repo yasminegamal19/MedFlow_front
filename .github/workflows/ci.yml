@@ -1,0 +1,67 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - run: npm ci
+
+      # Regression check for mskTriage.js against the product spec's 72
+      # worked scenarios — no test framework in this repo yet, but this
+      # script already asserts and exits non-zero on drift.
+      - name: MSK triage scenario check
+        run: node scripts/verify-msk-triage-scenarios.mjs
+
+      - name: Build
+        run: npm run build
+
+      # Handed to the deploy job so it ships exactly what was tested here,
+      # instead of rebuilding (and potentially drifting) on a second runner.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  # Ship the static build to cPanel over SSH — same cPanel account as the
+  # ai-service and backend, but this app has no server runtime: it's a pure
+  # static SPA (navigation is client-side via `?page=` query string, no
+  # deep-linkable paths), so deploy is just "copy dist/ over", no restart,
+  # no build-on-server step, no .htaccess rewrite needed.
+  deploy:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    concurrency: deploy-cpanel-frontend
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # Placeholder path — set to whatever the cPanel subdomain's document
+      # root actually is (e.g. the "app.deshelion.com" document root, not a
+      # git checkout — this app has no server-side code to check out).
+      - uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.CPANEL_SSH_HOST }}
+          username: ${{ secrets.CPANEL_SSH_USER }}
+          password: ${{ secrets.CPANEL_SSH_PASSWORD }}
+          port: ${{ secrets.CPANEL_SSH_PORT }}
+          source: "dist/*"
+          target: "~/app.deshelion.com"
+          strip_components: 1
+          overwrite: true

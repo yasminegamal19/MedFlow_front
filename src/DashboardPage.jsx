@@ -3,6 +3,7 @@ import {
   LogOut, MapPin, Database, LayoutDashboard, PlusCircle, ClipboardList,
   Clock3, CheckCircle2, AlertTriangle, ArrowUpRight, FileStack, GitBranch,
   Search, Filter, ChevronDown, ChevronLeft, ChevronRight, Download, Route,
+  Sparkles,
 } from "lucide-react";
 import { GlobalStyle } from "./styles.jsx";
 import { updateProfile, listCases } from "./api.js";
@@ -10,6 +11,7 @@ import { resolveReferralHub } from "./albertaReferralRouting.js";
 import TableEditor from "./TableEditor.jsx";
 import ClinicalPathwaysBrowser from "./ClinicalPathwaysBrowser.jsx";
 import ReferralRoutingBrowser from "./ReferralRoutingBrowser.jsx";
+import AiRequestsBrowser from "./AiRequestsBrowser.jsx";
 
 const STATUS_META = {
   created: { label: "Created", tone: "neutral" },
@@ -70,7 +72,12 @@ function exportCasesCsv(cases) {
 }
 
 export default function DashboardPage({ user, onLogout, onBack, onUserUpdate }) {
-  const [tab, setTab] = useState("overview"); // overview | profile | tables
+  // Reads ?tab= once on mount so a page that links back here (e.g.
+  // AiRequestDetailPage's "Back to AI requests") can reopen the right tab
+  // instead of always landing on "overview".
+  const [tab, setTab] = useState(
+    () => new URLSearchParams(window.location.search).get("tab") || "overview",
+  ); // overview | profile | tables | pathways | referrals | ai-requests
   const [clinicTown, setClinicTown] = useState(user?.clinic_town || "");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState(null);
@@ -337,7 +344,7 @@ export default function DashboardPage({ user, onLogout, onBack, onUserUpdate }) 
         </div>
       </div>
 
-      <div className={`db-wrap${tab === "tables" || tab === "pathways" || tab === "referrals" ? " wide" : ""}`}>
+      <div className={`db-wrap${tab === "tables" || tab === "pathways" || tab === "referrals" || tab === "ai-requests" ? " wide" : ""}`}>
         <div className="db-hero">
           <div>
             <h1 className="mf-page-title">{firstName ? `Welcome back, Dr. ${firstName}` : "Dashboard"}</h1>
@@ -368,11 +375,15 @@ export default function DashboardPage({ user, onLogout, onBack, onUserUpdate }) 
           <button className={`db-tab${tab === "referrals" ? " active" : ""}`} onClick={() => setTab("referrals")}>
             <Route size={14} /> Referral routing
           </button>
+          <button className={`db-tab${tab === "ai-requests" ? " active" : ""}`} onClick={() => setTab("ai-requests")}>
+            <Sparkles size={14} /> AI requests
+          </button>
         </div>
 
         {tab === "tables" && <TableEditor />}
         {tab === "pathways" && <ClinicalPathwaysBrowser />}
         {tab === "referrals" && <ReferralRoutingBrowser />}
+        {tab === "ai-requests" && <AiRequestsBrowser />}
 
         {tab === "overview" && (
           <>

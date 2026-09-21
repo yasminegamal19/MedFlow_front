@@ -1,6 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ChevronRight } from "lucide-react";
-import { listClinicalPathways } from "./api.js";
+import { listClinicalPathways, getPathwayAiSettings, updatePathwayAiSettings } from "./api.js";
+
+const SECTION_LABELS = {
+  eligibility: "Eligibility",
+  history: "History & details",
+  red_flags: "Red flags",
+  anatomical: "Anatomical / differential",
+  examination: "Examination",
+  investigations: "Investigations",
+  management: "Management",
+  final_assessment: "Final assessment",
+};
 
 function jsonPreview(value) {
   if (value == null) return "—";
@@ -44,9 +55,64 @@ function Table({ columns, rows, empty }) {
   );
 }
 
+/** Per-pathway, per-section control over which parts of the Clinical
+ * Assessment form the AI (both the ai-service model and the client-side
+ * keyword heuristic) is allowed to attempt. Disabling a section makes every
+ * consumer treat its fields exactly as if they had no ai_mapping at all —
+ * see PathwayService::disabledSections(). */
+function AiFillSettingsPanel({ pathwayId }) {
+  const [settings, setSettings] = useState(null);
+  const [error, setError] = useState(null);
+  const [savingCode, setSavingCode] = useState(null);
+
+  useEffect(() => {
+    setSettings(null);
+    setError(null);
+    getPathwayAiSettings(pathwayId)
+      .then(setSettings)
+      .catch((err) => setError(err.message || "Could not load AI-fill settings."));
+  }, [pathwayId]);
+
+  const toggle = (code) => {
+    if (!settings || savingCode) return;
+    setSavingCode(code);
+    updatePathwayAiSettings(pathwayId, code, !settings[code])
+      .then(setSettings)
+      .catch((err) => setError(err.message || "Could not update AI-fill setting."))
+      .finally(() => setSavingCode(null));
+  };
+
+  return (
+    <div className="db-ptable-card compact" style={{ padding: 12, marginBottom: 16 }}>
+      <div className="db-ptable-section" style={{ marginTop: 0 }}>AI auto-fill by section</div>
+      <p className="mf-tiny-note" style={{ margin: "0 0 10px" }}>
+        Which sections of this pathway's Clinical Assessment form the AI may suggest answers for. Turning a section
+        off makes the AI treat every field in it as unmapped — it's never asked about it, on either the model or the
+        client-side heuristic.
+      </p>
+      {error && <div className="db-empty"><AlertTriangle size={14} style={{ verticalAlign: -2, marginRight: 6 }} />{error}</div>}
+      {!error && !settings && <p className="mf-tiny-note">Loading…</p>}
+      {settings && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {Object.keys(SECTION_LABELS).map((code) => (
+            <button type="button" key={code}
+              className={`mf-mini-btn${settings[code] ? "" : " ghost"}`}
+              disabled={savingCode === code}
+              onClick={() => toggle(code)}>
+              {SECTION_LABELS[code]} · {settings[code] ? "on" : "off"}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PathwayDetail({ pathway }) {
   return (
     <div>
+      <AiFillSettingsPanel pathwayId={pathway.id} />
+
       <div className="db-ptable-section">Conditions</div>
       <Table
         empty="No conditions attached."

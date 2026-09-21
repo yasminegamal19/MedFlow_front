@@ -1,8 +1,9 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import MedFlowApp from "./MedFlowApp.jsx";
 import AlbertaRoutingPage from "./AlbertaRoutingPage.jsx";
 import DashboardPage from "./DashboardPage.jsx";
+import AiRequestDetailPage from "./AiRequestDetailPage.jsx";
 import LoginPage from "./LoginPage.jsx";
 import { setApiToken, logout as logoutApi } from "./api.js";
 import "./index.css";
@@ -21,9 +22,13 @@ function readStoredAuth() {
 function AuthGate() {
   const [auth, setAuth] = useState(readStoredAuth);
 
-  useEffect(() => {
-    setApiToken(auth?.token || null);
-  }, [auth]);
+  // Synchronous, not a useEffect: on a hard page load (any ?page=... link
+  // does a real navigation, not a SPA route change), a child page's own
+  // mount effect fires before this component's effects would — racing
+  // ahead of the token fix-up and using api.js's stale VITE_API_TOKEN
+  // fallback instead. Setting it directly in the render body guarantees
+  // every child sees the real token before its own effects ever run.
+  setApiToken(auth?.token || null);
 
   if (!auth) {
     return (
@@ -51,13 +56,23 @@ function AuthGate() {
     });
   };
 
-  const requestedPage = new URLSearchParams(window.location.search).get("page");
+  const searchParams = new URLSearchParams(window.location.search);
+  const requestedPage = searchParams.get("page");
   const backToWorkflow = () => { window.location.search = ""; };
 
   // Standalone tools, outside the case wizard's step gating — reachable any
   // time regardless of where the doctor is in an in-progress case.
   if (requestedPage === "alberta-routing") {
     return <AlbertaRoutingPage user={auth.user} onLogout={handleLogout} onBack={backToWorkflow} />;
+  }
+  if (requestedPage === "ai-request") {
+    return (
+      <AiRequestDetailPage
+        id={searchParams.get("id")}
+        onLogout={handleLogout}
+        onBack={() => { window.location.search = "?page=dashboard&tab=ai-requests"; }}
+      />
+    );
   }
   if (requestedPage === "dashboard" || requestedPage === "profile") {
     return (
