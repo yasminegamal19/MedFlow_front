@@ -19,8 +19,8 @@ import {
 import { CONDITION_GROUPS, runMskTriage } from "./mskTriage.js";
 import { inferClinicalFieldsFromSections } from "./clinicalAutoFill.js";
 import {
-  getCurrentUser, listCaseTypes, listWorkflowTemplates, createPatient, createCase,
-  submitExtraction, submitPathwayFormExtraction, getAutoFill, getExtraction,
+  getCurrentUser, listCaseTypes, listWorkflowTemplates, createPatient, createCase, getCase,
+  submitExtraction, submitPathwayFormExtraction, getAutoFill, getExtraction, listExtractions,
   retryExtraction, isTerminal, evaluateRules,
   submitPathwayValidation, analyzeAttachment, listPathways, getPathwayDefinition,
   getReferralRoutingCatalog, getCaseReferralRouting, submitCaseReferralRouting,
@@ -246,6 +246,89 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
   // The created case's id — set once intake succeeds, consumed by Referral
   // Routing to GET/POST that case's referral-routing decision.
   const [caseId, setCaseId] = useState(null);
+
+  // Keep `case` in the URL alongside `page` once a case exists, so a direct
+  // link, bookmark, or reload can resume it (see the rehydration effect
+  // below) instead of every downstream page falling back to its static
+  // mock/demo data with no indication that's what happened.
+  useEffect(() => {
+    if (!caseId) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("case") === caseId) return;
+    params.set("case", caseId);
+    window.history.replaceState(window.history.state, "", `?${params.toString()}`);
+  }, [caseId]);
+
+  // Resume from `?case=...` in the URL (a direct link, bookmark, or reload)
+  // instead of the wizard's in-memory-only state silently starting over.
+  // Waits for `pathways` (fetched separately, see below) so the case's
+  // pathway_id can be mapped back to a condition group. Only rehydrates the
+  // case + patient + notes + the four AI job types (grounded extraction,
+  // pathway-form fill, imaging, pathway validation) — enough for Extraction
+  // and Clinical Assessment to show real data instead of PageExtraction's
+  // static mock fallback; later stages (referral draft, review decision,
+  // send status) still start fresh, since resuming those needs endpoints
+  // this pass doesn't touch.
+  const resumingRef = useRef(false);
+  useEffect(() => {
+    const urlCaseId = new URLSearchParams(window.location.search).get("case");
+    if (!urlCaseId || caseId || resumingRef.current || pathways.length === 0) return;
+    resumingRef.current = true;
+
+    (async () => {
+      try {
+        const c = await getCase(urlCaseId);
+        setCaseId(c.id);
+
+        if (c.patient) {
+          const [firstName, ...rest] = (c.patient.name || "").split(" ");
+          setPatient((prev) => ({
+            ...prev,
+            firstName: firstName || "",
+            lastName: rest.join(" "),
+            dob: c.patient.dob ? c.patient.dob.slice(0, 10) : "", // <input type="date"> needs YYYY-MM-DD, not the full ISO datetime
+            sex: c.patient.sex || "",
+            mrn: c.patient.mrn_token || "",
+            phone: c.patient.contact || "",
+          }));
+        }
+        setNotes(c.raw_notes || "");
+
+        const casePathwayId = c.pathways?.[0]?.pathway_id;
+        if (casePathwayId) {
+          setSelectedPathwayId(casePathwayId);
+          const meta = pathways.find((p) => p.id === casePathwayId);
+          if (meta) setClinicalCondition(meta.conditionGroup);
+          getPathwayDefinition(casePathwayId).then(setPathwayDefinition).catch(() => {});
+        }
+
+        const requests = await listExtractions({ caseId: c.id })
+          .then((body) => body.data)
+          .catch(() => []);
+        const latestOfType = (type) => requests
+          .filter((r) => r.type === type)
+          .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+
+        const extractionReq = latestOfType("grounded_extraction") || latestOfType("extraction");
+        if (extractionReq) {
+          const full = await getExtraction(extractionReq.id).catch(() => extractionReq);
+          setExtraction(full);
+          if (full.result?.items) setSections(sectionsFromItems(full.result.items));
+        }
+
+        const formFillReq = latestOfType("pathway_form_extraction");
+        if (formFillReq) setFormFillJob(await getExtraction(formFillReq.id).catch(() => formFillReq));
+
+        const imagingReq = latestOfType("imaging_analysis");
+        if (imagingReq) setImagingJob(await getExtraction(imagingReq.id).catch(() => imagingReq));
+
+        const validationReq = latestOfType("pathway_validation");
+        if (validationReq) setPathwayJob(await getExtraction(validationReq.id).catch(() => validationReq));
+      } catch (err) {
+        setIntakeError(err.message || "Could not resume this case from its link.");
+      }
+    })();
+  }, [pathways, caseId]);
   // The referral-routing catalog fetched from the backend (GET
   // /referral-routing/catalog); null falls back to the static
   // referralPathwayCatalog.js import (see PageReferralRouting).
@@ -368,6 +451,16 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
         contact: patient.phone || patient.email || null,
       });
 
+      // No typed note: the note itself comes from the first attached
+      // document instead (OCR'd + grounded-extracted server-side — see
+      // CaseController::store()'s referral_document handling), rather than
+      // submitting whatever placeholder text was typed just to satisfy the
+      // old required-field validation. Any remaining files stay plain
+      // attachments.
+      const hasRealNote = notes.trim().length >= 10;
+      const referralDocument = !hasRealNote && files.length > 0 ? files[0].file : null;
+      const attachmentFiles = referralDocument ? files.slice(1) : files;
+
       const newCase = await createCase({
         organization_id: user.organization_id,
         patient_id: newPatient.id,
@@ -377,10 +470,24 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
         ...(selectedPathwayId ? { pathway_id: selectedPathwayId } : {}),
         status: "created",
         raw_notes: notes,
-      }, files.map((f) => f.file));
+      }, attachmentFiles.map((f) => f.file), referralDocument);
       setCaseId(newCase.id);
 
-      const queued = await submitExtraction({ note: notes, pathway, caseId: newCase.id });
+      // Always submit extraction ourselves — for every case, regardless of
+      // whether the text came from typing or a document — through the same
+      // explicit POST /v1/ai/extractions call, the same validation
+      // (min 10 chars, so an empty/near-empty OCR result surfaces the exact
+      // same "note too short" error a bad typed note would), and the same
+      // catch block below. The backend's referral_document handling only
+      // OCRs and stores the document; it never submits an extraction of its
+      // own (see CaseController::store()) — this is the one place that does,
+      // so there's always exactly one visible call per case, never a silent
+      // "nothing happened" when relying on a document.
+      const sourceDocument = hasRealNote ? null : newCase.documents?.[0];
+      const extractionNote = hasRealNote ? notes : (sourceDocument?.extracted_text || "");
+      const queued = await submitExtraction({
+        note: extractionNote, pathway, caseId: newCase.id, sourceDocumentId: sourceDocument?.id,
+      });
       setExtraction(queued);
 
       // Fetch the selected pathway's field definition — the JSON meant to
@@ -398,9 +505,12 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
         // Also ask the model to answer this pathway's own form fields
         // directly from the note — feeds Clinical Assessment's AI-suggested
         // values (see aiFieldValues below), in parallel with the grounded
-        // extraction above.
+        // extraction above. Same unified note text as above, so this works
+        // for a document-derived case too.
         setFormFillSubmitError(null);
-        submitPathwayFormExtraction({ note: notes, pathwayId: selectedPathwayId, caseId: newCase.id })
+        submitPathwayFormExtraction({
+          note: extractionNote, pathwayId: selectedPathwayId, caseId: newCase.id, sourceDocumentId: sourceDocument?.id,
+        })
           .then(setFormFillJob)
           .catch((err) => setFormFillSubmitError(err.message || "Could not start AI form-fill."));
       }
@@ -551,6 +661,7 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
             {page === "clinical-assessment" && (
               <PageClinicalAssessment conditionGroup={clinicalCondition} pathways={pathways} sections={sections}
                 aiFieldValues={aiFieldValues} formFillStatus={formFillJob?.status}
+                prefetchedDefinition={pathwayDefinition}
                 onChangeConditionGroup={setClinicalCondition}
                 onNext={() => { runValidation(sections); next(); }} onBack={back} />
             )}
@@ -767,7 +878,10 @@ function PageIntake({ pathways, clinicalCondition, onChangePathway, notes, setNo
   const [dragOver, setDragOver] = useState(false);
   const [touched, setTouched] = useState(false);
   const inputRef = useRef(null);
-  const notesValid = notes.trim().length >= 10;
+  // A typed note is required UNLESS a document is attached — in that case
+  // the backend OCRs the document and extracts from it instead (see
+  // handleCreateCase's referralDocument branch), so there's nothing to type.
+  const notesValid = notes.trim().length >= 10 || files.length > 0;
   const canSubmit = notesValid && clinicalCondition && !submitting;
 
   // Sourced from the database (GET /pathways) once loaded; falls back to
@@ -810,7 +924,9 @@ function PageIntake({ pathways, clinicalCondition, onChangePathway, notes, setNo
             <textarea className="mf-textarea"
               placeholder="Paste the visit note: chief complaint, history, exam findings, prior treatment, imaging…"
               value={notes} onChange={(e) => setNotes(e.target.value)} />
-            {touched && !notesValid && <p className="mf-error">Add a visit note of at least 10 characters.</p>}
+            {touched && !notesValid && (
+              <p className="mf-error">Add a visit note of at least 10 characters, or attach a document below instead.</p>
+            )}
           </Field>
           <Field label="Supporting documents">
             <div className={`mf-dropzone${dragOver ? " drag" : ""}`} role="button" tabIndex={0}
@@ -1271,22 +1387,33 @@ function AlertBanner({ tone = "clay", title, children }) {
   );
 }
 
-function PageClinicalAssessment({ conditionGroup, pathways, onChangeConditionGroup, sections, aiFieldValues, formFillStatus, onNext, onBack }) {
+function PageClinicalAssessment({ conditionGroup, pathways, onChangeConditionGroup, sections, aiFieldValues, formFillStatus, prefetchedDefinition, onNext, onBack }) {
   const pathwayMeta = pathways.find((p) => p.conditionGroup === conditionGroup);
 
   // The form itself comes from the backend (GET /pathways/{id}) rather than
   // a hardcoded per-condition-group config — refetched whenever the tab
-  // (i.e. the DB pathway id behind it) changes.
-  const [definition, setDefinition] = useState(null);
+  // (i.e. the DB pathway id behind it) changes. `prefetchedDefinition` is
+  // whatever handleCreateCase already fetched for the pathway selected at
+  // intake — reused as-is when the tab still matches it, so arriving here
+  // right after case creation doesn't re-request a definition already in
+  // hand. Switching to a different pathway tab still fetches fresh.
+  const [definition, setDefinition] = useState(
+    prefetchedDefinition?.pathway?.id === pathwayMeta?.id ? prefetchedDefinition : null
+  );
   const [defError, setDefError] = useState(null);
   useEffect(() => {
+    if (prefetchedDefinition?.pathway?.id === pathwayMeta?.id) {
+      setDefinition(prefetchedDefinition);
+      setDefError(null);
+      return;
+    }
     setDefinition(null);
     setDefError(null);
     if (!pathwayMeta) return;
     getPathwayDefinition(pathwayMeta.id)
       .then(setDefinition)
       .catch((err) => setDefError(err.message || "Could not load this pathway's clinical assessment form."));
-  }, [pathwayMeta?.id]);
+  }, [pathwayMeta?.id, prefetchedDefinition]);
 
   return (
     <PageShell title="Clinical assessment"
