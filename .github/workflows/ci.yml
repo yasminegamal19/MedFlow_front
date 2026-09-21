@@ -29,18 +29,19 @@ jobs:
         run: npm run build
 
       # Handed to the deploy job so it ships exactly what was tested here,
-      # instead of rebuilding (and potentially drifting) on a second runner.
+      # instead of rebuilding (and potentially drifting) on a second runner
+      # or on the resource-constrained cPanel box.
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
           retention-days: 7
 
-  # Ship the static build to cPanel over SSH — same cPanel account as the
-  # ai-service and backend, but this app has no server runtime: it's a pure
-  # static SPA (navigation is client-side via `?page=` query string, no
-  # deep-linkable paths), so deploy is just "copy dist/ over", no restart,
-  # no build-on-server step, no .htaccess rewrite needed.
+  # Ship the static build to cPanel over SSH — same cPanel account/password
+  # as the ai-service and backend, but this app has no server runtime: it's
+  # a pure static SPA (navigation is client-side via `?page=` query string,
+  # no deep-linkable paths), so deploy is just "copy dist/ over" — no git
+  # checkout, deploy key, or build step on the server.
   deploy:
     needs: test
     if: github.event_name == 'push'
