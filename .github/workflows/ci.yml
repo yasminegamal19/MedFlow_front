@@ -53,9 +53,9 @@ jobs:
           name: dist
           path: dist/
 
-      # Placeholder path — set to whatever the cPanel subdomain's document
-      # root actually is (e.g. the "app.deshelion.com" document root, not a
-      # git checkout — this app has no server-side code to check out).
+      # ~/frontend.deshelion.com is the actual cPanel document root (holds
+      # index.html + assets/ directly) — not a git checkout, this app has no
+      # server-side code to check out.
       - uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.CPANEL_SSH_HOST }}
@@ -63,6 +63,6 @@ jobs:
           password: ${{ secrets.CPANEL_SSH_PASSWORD }}
           port: ${{ secrets.CPANEL_SSH_PORT }}
           source: "dist/*"
-          target: "~/app.deshelion.com"
+          target: "~/frontend.deshelion.com"
           strip_components: 1
           overwrite: true
