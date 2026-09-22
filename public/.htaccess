@@ -1,3 +1,12 @@
+# Force correct MIME types for ES module scripts. Some hosts' default
+# mime.types has no .js/.mjs mapping, so LiteSpeed/Apache falls back to
+# application/octet-stream — browsers refuse to execute a <script type="module">
+# with that MIME type ("Failed to load module script").
+<IfModule mod_mime.c>
+  AddType text/javascript .js .mjs
+  AddType text/css .css
+</IfModule>
+
 # index.html must always be revalidated so a new deploy is visible
 # immediately — LiteSpeed's page cache otherwise serves a stale copy
 # referencing old (deleted) hashed asset filenames until it expires.
