@@ -1,12 +1,14 @@
 import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
-import MedFlowApp from "./MedFlowApp.jsx";
-import AlbertaRoutingPage from "./AlbertaRoutingPage.jsx";
-import DashboardPage from "./DashboardPage.jsx";
-import AiRequestDetailPage from "./AiRequestDetailPage.jsx";
-import LoginPage from "./LoginPage.jsx";
-import { setApiToken, logout as logoutApi } from "./api.js";
+import MedFlowApp from "./pages/MedFlowApp.jsx";
+import AlbertaRoutingPage from "./pages/AlbertaRoutingPage.jsx";
+import DashboardPage from "./pages/DashboardPage.jsx";
+import AiRequestDetailPage from "./pages/AiRequestDetailPage.jsx";
+import LoginPage from "./pages/LoginPage.jsx";
+import { setApiToken, logout as logoutApi } from "./lib/api.js";
 import "./index.css";
+import "./styles/tokens.css";
+import "./styles/app.css";
 
 const STORAGE_KEY = "medflow.auth";
 

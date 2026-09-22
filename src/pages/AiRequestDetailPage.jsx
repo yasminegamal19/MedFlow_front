@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, Check, FileText, LogOut, PenLine } from "lucide-react";
-import { GlobalStyle } from "./styles.jsx";
-import { getExtraction } from "./api.js";
+import { getExtraction } from "../lib/api.js";
 import { TYPE_LABELS, StatusPill, formatDuration, formatDate } from "./AiRequestsBrowser.jsx";
 
 /** Full provenance: which of the case's documents (if any) this result's
@@ -201,7 +200,6 @@ export default function AiRequestDetailPage({ id, onLogout, onBack }) {
 
   return (
     <div className="mf-app">
-      <GlobalStyle />
       <div style={{
         display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
         padding: "14px 24px", borderBottom: "1px solid var(--line)", background: "var(--paper-raised)",

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Search, Filter, ChevronDown, AlertTriangle } from "lucide-react";
-import { getReferralRoutingCatalog } from "./api.js";
+import { getReferralRoutingCatalog } from "../lib/api.js";
 
 // Same free-text destination heuristic used by the referral wizard
 // (MedFlowApp.jsx's destinationTone) — kept local since it's a light,

@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { LogOut, MapPin, Search } from "lucide-react";
-import { GlobalStyle } from "./styles.jsx";
-import { ALBERTA_REFERRAL_HUBS, resolveReferralHub } from "./albertaReferralRouting.js";
+import { ALBERTA_REFERRAL_HUBS, resolveReferralHub } from "../lib/albertaReferralRouting.js";
 
 const AUTOMATION_STEPS = [
   { title: "Physician enters clinic address", detail: "Clarity extracts town, city, postal code, PCN and region." },
@@ -63,7 +62,6 @@ export default function AlbertaRoutingPage({ user, onLogout, onBack }) {
 
   return (
     <div className="mf-app">
-      <GlobalStyle />
       <style>{`
         .ab-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px;
           padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--paper-raised); }

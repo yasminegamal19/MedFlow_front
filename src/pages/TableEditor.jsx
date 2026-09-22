@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Plus, Pencil, Trash2, X, Check, ChevronDown, AlertTriangle, Search } from "lucide-react";
-import { tableResources } from "./api.js";
-import { TABLE_CONFIGS, EDITABLE_TABLE_KEYS, rowLabel } from "./dataTables.js";
+import { tableResources } from "../lib/api.js";
+import { TABLE_CONFIGS, EDITABLE_TABLE_KEYS, rowLabel } from "../data/dataTables.js";
 
 // Fetch every configured table (editable + reference-only, e.g.
 // organizations) so FK <select>s always have their options ready, but only

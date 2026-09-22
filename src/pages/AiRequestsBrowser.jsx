@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
-import { listExtractions } from "./api.js";
+import { listExtractions } from "../lib/api.js";
 
 export const TYPE_LABELS = {
   extraction: "Extraction",

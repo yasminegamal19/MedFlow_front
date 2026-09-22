@@ -13,7 +13,7 @@
  * Run with: node scripts/verify-msk-triage-scenarios.mjs
  */
 
-import { emptyMskInput, runMskTriage } from "../src/mskTriage.js";
+import { emptyMskInput, runMskTriage } from "../src/lib/mskTriage.js";
 
 // ── Shared fixture builders — the spec's 24-scenario shape is identical
 // across all three condition groups (1-6 mild, 7-12 moderate, 13-18 severe,

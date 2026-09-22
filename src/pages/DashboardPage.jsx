@@ -5,9 +5,8 @@ import {
   Search, Filter, ChevronDown, ChevronLeft, ChevronRight, Download, Route,
   Sparkles,
 } from "lucide-react";
-import { GlobalStyle } from "./styles.jsx";
-import { updateProfile, listCases } from "./api.js";
-import { resolveReferralHub } from "./albertaReferralRouting.js";
+import { updateProfile, listCases } from "../lib/api.js";
+import { resolveReferralHub } from "../lib/albertaReferralRouting.js";
 import TableEditor from "./TableEditor.jsx";
 import ClinicalPathwaysBrowser from "./ClinicalPathwaysBrowser.jsx";
 import ReferralRoutingBrowser from "./ReferralRoutingBrowser.jsx";
@@ -160,7 +159,6 @@ export default function DashboardPage({ user, onLogout, onBack, onUserUpdate }) 
 
   return (
     <div className="mf-app">
-      <GlobalStyle />
       <style>{`
         .db-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px;
           padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--paper-raised); }

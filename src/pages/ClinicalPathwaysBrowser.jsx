@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, ChevronRight } from "lucide-react";
-import { listClinicalPathways, getPathwayAiSettings, updatePathwayAiSettings } from "./api.js";
+import { listClinicalPathways, getPathwayAiSettings, updatePathwayAiSettings } from "../lib/api.js";
 
 const SECTION_LABELS = {
   eligibility: "Eligibility",

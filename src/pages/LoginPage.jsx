@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { ShieldCheck, LogIn } from "lucide-react";
-import { GlobalStyle } from "./styles.jsx";
-import { login, setApiToken } from "./api.js";
+import { login, setApiToken } from "../lib/api.js";
 
 export default function LoginPage({ onLoggedIn }) {
   const [email, setEmail] = useState("");
@@ -33,7 +32,6 @@ export default function LoginPage({ onLoggedIn }) {
 
   return (
     <div className="mf-app">
-      <GlobalStyle />
       <div className="mf-auth-screen">
         <form className="mf-auth-card" onSubmit={submit}>
           <div className="mf-auth-brand">
