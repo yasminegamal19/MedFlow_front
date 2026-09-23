@@ -1,0 +1,23 @@
+.brand-logo {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+}
+
+.brand-logo svg {
+    flex-shrink: 0;
+}
+
+.brand-word {
+    font-family: "Inter", system-ui, sans-serif;
+    font-weight: 700;
+    font-size: 1.4rem;
+    letter-spacing: -0.03em;
+    line-height: 1;
+    color: var(--c-primary);
+    direction: ltr;
+}
+
+.brand-word.is-light {
+    color: var(--c-white);
+}

@@ -1,0 +1,56 @@
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.74rem;
+    font-weight: 600;
+    line-height: 1.6;
+    padding: 0.2rem 0.65rem;
+    border-radius: var(--radius-pill);
+    border: 1px solid transparent;
+    white-space: nowrap;
+}
+
+.status-badge::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.status-badge--draft {
+    color: #5C7490;
+    background: #F1F5F9;
+    border-color: #E2E8F0;
+}
+
+.status-badge--review {
+    color: #9A6206;
+    background: #FEF6E7;
+    border-color: #F7E2BC;
+}
+
+.status-badge--sent {
+    color: var(--c-primary-800);
+    background: var(--c-primary-050);
+    border-color: var(--c-primary-100);
+}
+
+.status-badge--accepted {
+    color: var(--c-teal-800);
+    background: var(--c-teal-050);
+    border-color: var(--c-teal-100);
+}
+
+.status-badge--active {
+    color: var(--c-teal-800);
+    background: var(--c-teal-050);
+    border-color: var(--c-teal-100);
+}
+
+.status-badge--canceled {
+    color: #9C2E27;
+    background: #FDF3F2;
+    border-color: #F3D2CF;
+}

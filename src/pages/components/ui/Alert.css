@@ -1,0 +1,33 @@
+.alert {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    font-size: 0.87rem;
+    line-height: 1.7;
+    border-radius: var(--radius-sm);
+    border: 1px solid transparent;
+    padding: 0.8rem 1rem;
+}
+
+.alert svg {
+    flex-shrink: 0;
+    margin-top: 0.22rem;
+}
+
+.alert--error {
+    color: #9C2E27;
+    background: #FDF3F2;
+    border-color: #F3D2CF;
+}
+
+.alert--success {
+    color: var(--c-teal-800);
+    background: var(--c-teal-050);
+    border-color: var(--c-teal-100);
+}
+
+.alert--info {
+    color: var(--c-primary-800);
+    background: var(--c-primary-050);
+    border-color: var(--c-primary-100);
+}

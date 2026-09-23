@@ -1,0 +1,113 @@
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: var(--gutter);
+    background: rgba(10, 37, 71, 0.5);
+    backdrop-filter: blur(2px);
+    animation: modal-fade 0.2s var(--ease);
+}
+
+.modal-card {
+    width: 100%;
+    max-width: 480px;
+    max-height: min(88vh, 720px);
+    display: flex;
+    flex-direction: column;
+    background: var(--c-white);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+    animation: modal-pop 0.25s var(--ease);
+}
+
+.modal-card--sm {
+    max-width: 400px;
+}
+
+.modal-card--lg {
+    max-width: 640px;
+}
+
+.modal-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1.35rem 1.5rem;
+    border-bottom: 1px solid var(--c-border-soft);
+    flex-shrink: 0;
+}
+
+.modal-head h2 {
+    font-size: 1.05rem;
+    margin-bottom: 0.3rem;
+}
+
+.modal-head p {
+    font-size: 0.85rem;
+    color: var(--c-ink-soft);
+    max-width: 46ch;
+}
+
+.modal-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    color: var(--c-ink-soft);
+    background: var(--c-surface-alt);
+    border: 1px solid var(--c-border-soft);
+    border-radius: 50%;
+    cursor: pointer;
+    transition: color 0.2s var(--ease), background 0.2s var(--ease);
+}
+
+.modal-close:hover {
+    color: var(--c-primary);
+    background: var(--c-primary-050);
+}
+
+.modal-body {
+    padding: 1.4rem 1.5rem;
+    overflow-y: auto;
+}
+
+.modal-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.65rem;
+    padding: 1.1rem 1.5rem;
+    border-top: 1px solid var(--c-border-soft);
+    background: var(--c-surface-alt);
+    flex-shrink: 0;
+}
+
+@keyframes modal-fade {
+    from {
+        opacity: 0;
+    }
+}
+
+@keyframes modal-pop {
+    from {
+        opacity: 0;
+        transform: translateY(10px) scale(0.98);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .modal-overlay {
+        animation: none;
+    }
+
+    .modal-card {
+        animation: none;
+    }
+}

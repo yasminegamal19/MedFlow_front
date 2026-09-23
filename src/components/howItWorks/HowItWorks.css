@@ -1,0 +1,116 @@
+.steps-row {
+    position: relative;
+    display: grid;
+    gap: 1.25rem;
+}
+
+.steps-line {
+    display: none;
+}
+
+.step-card {
+    position: relative;
+    background: var(--c-white);
+    border: 1px solid var(--c-border-soft);
+    border-radius: var(--radius-md);
+    padding: 1.75rem 1.5rem;
+    box-shadow: var(--shadow-xs);
+    transition: transform 0.28s var(--ease), box-shadow 0.28s var(--ease),
+        border-color 0.28s var(--ease);
+}
+
+.step-card::before {
+    content: "";
+    position: absolute;
+    inset-inline-start: 0;
+    top: 1.5rem;
+    bottom: 1.5rem;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--g-brand);
+    opacity: 0;
+    transition: opacity 0.28s var(--ease);
+}
+
+[dir="rtl"] .step-card::before {
+    border-radius: 3px 0 0 3px;
+}
+
+.step-card:hover {
+    transform: translateY(-4px);
+    border-color: var(--c-primary-100);
+    box-shadow: var(--shadow-md);
+}
+
+.step-card:hover::before {
+    opacity: 1;
+}
+
+.step-number {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-sm);
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--c-white);
+    background: var(--g-brand);
+    margin-bottom: 1rem;
+    box-shadow: var(--shadow-primary);
+}
+
+.step-card h3 {
+    font-size: 1.05rem;
+    margin-bottom: 0.45rem;
+}
+
+.step-card p {
+    color: var(--c-ink-soft);
+    font-size: var(--fs-sm);
+}
+
+.step-flag {
+    display: inline-block;
+    margin-top: 0.9rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--c-primary-700);
+    background: var(--c-primary-050);
+    border: 1px solid var(--c-primary-100);
+    padding: 0.25rem 0.6rem;
+    border-radius: var(--radius-pill);
+}
+
+@media (min-width: 620px) {
+    .steps-row {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 1.4rem;
+    }
+}
+
+@media (min-width: 1000px) {
+    .steps-row {
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1.4rem;
+    }
+
+    .steps-line {
+        display: block;
+        position: absolute;
+        top: 3.65rem;
+        inset-inline: 12%;
+        height: 2px;
+        background: repeating-linear-gradient(to right,
+                var(--c-primary-200) 0,
+                var(--c-primary-200) 6px,
+                transparent 6px,
+                transparent 12px);
+        z-index: 0;
+    }
+
+    .step-card {
+        z-index: 1;
+    }
+}

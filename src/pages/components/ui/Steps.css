@@ -1,0 +1,62 @@
+.steps {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+
+.steps-item {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--c-ink-mute);
+}
+
+.steps-item:not(:last-child)::after {
+    content: "";
+    width: clamp(14px, 4vw, 34px);
+    height: 2px;
+    border-radius: 2px;
+    background: var(--c-border);
+    margin-inline: 0.35rem;
+}
+
+.steps-marker {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    font-size: 0.72rem;
+    background: var(--c-surface-alt);
+    border: 1px solid var(--c-border);
+    flex-shrink: 0;
+}
+
+.steps-item.is-current {
+    color: var(--c-primary-800);
+}
+
+.steps-item.is-current .steps-marker {
+    color: var(--c-white);
+    background: var(--g-brand);
+    border-color: transparent;
+    box-shadow: 0 0 0 4px var(--c-primary-100);
+}
+
+.steps-item.is-done {
+    color: var(--c-teal-800);
+}
+
+.steps-item.is-done .steps-marker {
+    color: var(--c-white);
+    background: var(--c-teal);
+    border-color: transparent;
+}
+
+.steps-item.is-done:not(:last-child)::after {
+    background: var(--c-teal-300);
+}

@@ -1,0 +1,20 @@
+.faq-inner {
+    max-width: 880px;
+}
+
+.faq-panel {
+    background: var(--c-white);
+    border: 1px solid var(--c-border-soft);
+    border-radius: var(--radius-lg);
+    padding: 0.4rem 0.9rem;
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+}
+
+.faq-panel .accordion {
+    border-top: none;
+}
+
+.faq-panel .accordion-item:last-child {
+    border-bottom: none;
+}
