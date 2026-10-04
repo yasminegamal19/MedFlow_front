@@ -328,10 +328,10 @@
 }
 
 .mf-nav-item.is-current {
-  background: var(--gradient-brand);
-  color: white;
-  font-weight: 600;
-  box-shadow: 0 6px 14px rgba(11, 73, 155, 0.22);
+  background: linear-gradient(135deg, #0b499b 0%, #1d5fb4 45%, #09a79b 100%) !important;
+    color: #ffffff !important;
+    border-radius: 15px;
+    box-shadow: 0 10px 24px rgba(21, 84, 166, 0.18);
 }
 
 .mf-nav-item.is-current .mf-nav-marker {

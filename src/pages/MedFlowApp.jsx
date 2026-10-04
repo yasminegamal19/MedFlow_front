@@ -28,8 +28,9 @@ import {
   MapPin,
   ClipboardList,
   Route,
+  Lock,
 } from "lucide-react";
-import { GlobalStyle } from "./styles.jsx";
+import "./styles/app.css";
 import Logo from "./components/ui/Logo.jsx";
 import {
   resolveReferralHub,
@@ -951,7 +952,6 @@ export default function MedFlowApp({ user, onLogout, onOpenDashboard } = {}) {
 
   return (
     <div className="mf-app">
-      <GlobalStyle />
       <TopBar
         statusLabel={statusLabel}
         stepIndex={currentIndex}
@@ -1295,6 +1295,8 @@ function Sidebar({
                     <Check size={13} strokeWidth={3} />
                   ) : isCurrent ? (
                     <Icon size={14} />
+                  ) : state === "locked" ? (
+                    <Lock size={12} />
                   ) : (
                     <span className="mf-nav-num">{i + 1}</span>
                   )}
@@ -1344,7 +1346,7 @@ function PagePatient({ patient, setPatient, onNext }) {
     >
       <PrincipleBanner />
       <div className="mf-two-col">
-        <div>
+        <div className="mf-form-card">
           <Field label="Patient name">
             <div className="mf-input-grid">
               <input
@@ -1469,7 +1471,7 @@ function PagePatient({ patient, setPatient, onNext }) {
           <SummaryRow k="Payer" v={patient.payer || "—"} />
           <SummaryRow
             k="Status"
-            v={<StatusPillSmall color="amber">Draft</StatusPillSmall>}
+            v={<StatusPillSmall color="gray">Draft</StatusPillSmall>}
           />
           <button
             className="mf-primary-btn full"
@@ -1656,7 +1658,7 @@ function PageIntake({
           <SummaryRow k="Attachments" v={files.length} />
           <SummaryRow
             k="Status"
-            v={<StatusPillSmall color="amber">Draft</StatusPillSmall>}
+            v={<StatusPillSmall color="gray">Draft</StatusPillSmall>}
           />
           <button
             className="mf-primary-btn full"

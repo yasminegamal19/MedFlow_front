@@ -36,9 +36,7 @@ import {
   ALL_ALBERTA_TOWNS,
   ALBERTA_REFERRAL_HUBS,
 } from "./albertaReferralRouting.js";
-// Offline fallback for the Referral Routing step — used only if
-// GET /referral-routing/catalog can't be reached; the backend-seeded
-// catalog (ReferralRoutingSeeder) is otherwise the source of truth.
+
 import {
   ZONES,
   PROGRAM_CONTACTS as STATIC_PROGRAM_CONTACTS,
